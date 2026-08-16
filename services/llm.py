@@ -89,7 +89,7 @@ async def classify_and_reply(message: str, departments: list[dict], config) -> d
             resp = await client.post(_endpoint(config.base_url), json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         raise LlmError(f"Falha ao chamar a LLM em {config.base_url}: {exc}") from exc
 
     try:
@@ -136,14 +136,17 @@ async def transcribe_audio(audio_b64: str, config, mime_type: str = "audio/ogg")
 
 
 async def ping(base_url: str, model: str, api_key: str = "") -> str:
-    """Retorna a versão da LLM ou lança exceção (API compatível com OpenAI)."""
+    """Retorna "ok" se a LLM responder, ou lança LlmError (API compatível com OpenAI)."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(base_url.rstrip("/") + "/models", headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-    if isinstance(data, dict) and data.get("data"):
-        return "ok"
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            resp = await client.get(base_url.rstrip("/") + "/models", headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise LlmError(f"Não foi possível conectar à LLM em {base_url}: {exc}") from exc
+    if not (isinstance(data, dict) and data.get("data")):
+        raise LlmError(f"A LLM em {base_url} não respondeu no formato esperado (endpoint /models)")
     return "ok"

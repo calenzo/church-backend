@@ -1,4 +1,6 @@
+import json
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -59,6 +61,23 @@ def _verify_token(token: str | None):
         raise HTTPException(status_code=401, detail="Token inválido")
 
 
+def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
+    """Registra um passo do fluxo no campo steps (JSON) para o dashboard."""
+    try:
+        steps = json.loads(log.steps) if log.steps else []
+        if not isinstance(steps, list):
+            steps = []
+    except (TypeError, ValueError):
+        steps = []
+    steps.append({
+        "step": step,
+        "status": status,
+        "detail": detail,
+        "ts": datetime.utcnow().isoformat(),
+    })
+    log.steps = json.dumps(steps, ensure_ascii=False)
+
+
 @router.post("/evolution")
 async def evolution_webhook(request: Request, x_token: str | None = Header(default=None), db: Session = Depends(get_db)):
     try:
@@ -117,27 +136,38 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     db.commit()
     db.refresh(log)
 
+    _add_step(log, "mensagem recebida")
+    db.commit()
     logger.info("Mensagem recebida de %s: %s", from_number, text[:80])
 
-    if media_key:
-        try:
+    try:
+        if media_key:
+            _add_step(log, "baixando mídia (áudio)")
+            db.commit()
             audio_b64 = await evolution.get_media_base64(key.get("id"))
             if not audio_b64:
                 raise llm.LlmError("Mídia não encontrada para transcrever")
+            _add_step(log, "transcrevendo áudio")
+            db.commit()
             text = await llm.transcribe_audio(audio_b64, config)
             log.text = text
+            _add_step(log, "áudio transcrito", detail=text[:80])
             db.commit()
-        except (evolution.EvolutionError, llm.LlmError) as exc:
-            log.status = "failed"
-            log.error = str(exc)
-            db.commit()
-            return {"ok": True, "error": str(exc)}
 
-    try:
+        _add_step(log, "classificando com a LLM")
+        db.commit()
         result = await llm.classify_and_reply(text, departments, config)
-    except llm.LlmError as exc:
+    except (evolution.EvolutionError, llm.LlmError) as exc:
         log.status = "failed"
         log.error = str(exc)
+        _add_step(log, "falha", status="error", detail=str(exc))
+        db.commit()
+        return {"ok": True, "error": str(exc)}
+    except Exception as exc:  # nunca responder 500: registra e encerra
+        logger.exception("Erro inesperado ao processar mensagem de %s", from_number)
+        log.status = "failed"
+        log.error = str(exc)
+        _add_step(log, "erro inesperado", status="error", detail=str(exc))
         db.commit()
         return {"ok": True, "error": str(exc)}
 
@@ -152,6 +182,8 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     log.department_id = matched_dep.id if matched_dep else None
     log.llm_reply = reply
     log.status = "routed"
+    _add_step(log, "classificado", detail=f"departamento: {department_name}")
+    db.commit()
 
     # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo configurado
     if matched and matched.get("group_jid"):
@@ -161,21 +193,25 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
         )
         try:
             await evolution.send_text(matched["group_jid"], group_text)
+            _add_step(log, "encaminhado para o grupo", detail=matched["group_jid"])
         except evolution.EvolutionError as exc:
             logger.error("Falha ao encaminhar para o grupo %s: %s", matched["group_jid"], exc)
             log.error = log.error or ""
             log.error += f" | grupo: {exc}"
             log.status = "routed_with_error"
+            _add_step(log, "falha ao encaminhar ao grupo", status="error", detail=str(exc))
 
     # 2) Envia a resposta da LLM de volta para o membro
     if reply:
         try:
             await evolution.send_text(f"{from_number}@s.whatsapp.net", reply)
+            _add_step(log, "resposta enviada ao membro")
         except evolution.EvolutionError as exc:
             logger.error("Falha ao responder %s: %s", from_number, exc)
             log.error = log.error or ""
             log.error += f" | resposta: {exc}"
             log.status = "routed_with_error"
+            _add_step(log, "falha ao enviar resposta", status="error", detail=str(exc))
 
     db.commit()
     return {"ok": True, "department": department_name}

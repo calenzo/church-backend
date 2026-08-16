@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.3
     llm_timeout: float = 120.0
     # Modelo Whisper para transcrição de áudios (faster-whisper local)
-    llm_stt_model: str = "small"
+    llm_stt_model: str = "tiny"
 
     cors_origins: str = "*"
 

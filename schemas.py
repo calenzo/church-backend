@@ -62,6 +62,7 @@ class MessageOut(BaseModel):
     llm_reply: str
     status: str
     error: str
+    steps: str = ""
     created_at: datetime | None = None
 
 

@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from config import settings
 from database import Base, engine
@@ -11,6 +12,13 @@ from routers import board, webhook
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Migração idempotente para colunas adicionadas depois do primeiro deploy.
+    for column in ("steps TEXT DEFAULT ''",):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE message_log ADD COLUMN IF NOT EXISTS {column}"))
+        except Exception:
+            pass
     yield
 
 

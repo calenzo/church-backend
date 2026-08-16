@@ -110,10 +110,16 @@ async def transcribe_audio(audio_b64: str, config, mime_type: str = "audio/ogg")
 
     model_name = getattr(config, "stt_model", "") or settings.llm_stt_model
     if _whisper_model is None or _whisper_model_name != model_name:
-        from faster_whisper import WhisperModel
+        try:
+            from faster_whisper import WhisperModel
 
-        _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        _whisper_model_name = model_name
+            _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            _whisper_model_name = model_name
+        except (ImportError, RuntimeError, OSError) as exc:
+            raise LlmError(
+                f"Não foi possível carregar o modelo de transcrição '{model_name}'. "
+                f"Verifique se faster-whisper está instalado e o modelo baixável: {exc}"
+            ) from exc
 
     audio_bytes = base64.b64decode(audio_b64)
 

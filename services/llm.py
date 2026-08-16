@@ -30,8 +30,16 @@ class LlmError(Exception):
     pass
 
 
+def _normalize_base(base_url: str) -> str:
+    """Remove sufixo /v1 (aceita URLs com ou sem o segmento /v1)."""
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base
+
+
 def _endpoint(base_url: str) -> str:
-    return base_url.rstrip("/") + "/v1/chat/completions"
+    return _normalize_base(base_url) + "/v1/chat/completions"
 
 
 def _extract_json(text: str) -> dict:
@@ -128,11 +136,14 @@ async def transcribe_audio(audio_b64: str, config, mime_type: str = "audio/ogg")
 
 
 async def ping(base_url: str, model: str, api_key: str = "") -> str:
-    """Retorna a versão da LLM ou lança exceção."""
+    """Retorna a versão da LLM ou lança exceção (API compatível com OpenAI)."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(base_url.rstrip("/") + "/api/version", headers=headers)
+        resp = await client.get(base_url.rstrip("/") + "/models", headers=headers)
         resp.raise_for_status()
-        return resp.json().get("version", "ok")
+        data = resp.json()
+    if isinstance(data, dict) and data.get("data"):
+        return "ok"
+    return "ok"

@@ -53,6 +53,8 @@ class MessageLog(Base):
     llm_reply: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(40), default="received")  # received|routed|failed|sent
     error: Mapped[str] = mapped_column(Text, default="")
+    media_key: Mapped[str] = mapped_column(String(200), default="")
+    media_message_id: Mapped[str] = mapped_column(String(200), default="")
     steps: Mapped[str] = mapped_column(Text, default="")  # JSON: [{"step","status","detail","ts"}]
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 

@@ -62,6 +62,8 @@ class MessageOut(BaseModel):
     llm_reply: str
     status: str
     error: str
+    media_key: str = ""
+    media_message_id: str = ""
     steps: str = ""
     created_at: datetime | None = None
 

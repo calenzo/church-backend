@@ -13,7 +13,7 @@ from routers import board, webhook
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     # Migração idempotente para colunas adicionadas depois do primeiro deploy.
-    for column in ("steps TEXT DEFAULT ''",):
+    for column in ("steps TEXT DEFAULT ''", "media_key TEXT DEFAULT ''", "media_message_id TEXT DEFAULT ''"):
         try:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE message_log ADD COLUMN IF NOT EXISTS {column}"))

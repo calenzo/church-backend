@@ -1,18 +1,33 @@
+import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from config import settings
-from database import get_db
+from database import SessionLocal, get_db
 from models import Department, LLMConfig, MessageLog
 from services import evolution, llm
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
+
+# IDs de mensagens recentes para evitar reprocessamento em retries da Evolution
+_recent = {}
+
+
+def _dedup(message_id: str, ttl: int = 20) -> bool:
+    if not message_id:
+        return False
+    now = time.monotonic()
+    if now - _recent.get(message_id, -ttl) < ttl:
+        return True
+    _recent[message_id] = now
+    return False
 
 
 def get_or_create_config(db: Session) -> LLMConfig:
@@ -56,11 +71,6 @@ def _normalize_jid(jid: str) -> str:
     return jid.split("@")[0] if "@" in jid else jid
 
 
-def _verify_token(token: str | None):
-    if settings.webhook_token and token != settings.webhook_token:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-
 def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
     """Registra um passo do fluxo no campo steps (JSON) para o dashboard."""
     try:
@@ -76,6 +86,107 @@ def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
         "ts": datetime.utcnow().isoformat(),
     })
     log.steps = json.dumps(steps, ensure_ascii=False)
+
+
+async def _process_message(log_id: int):
+    """Processa a mensagem em segundo plano, atualizando o log (steps) a cada etapa."""
+    db = SessionLocal()
+    try:
+        log = db.get(MessageLog, log_id)
+        if log is None:
+            return
+        config = get_or_create_config(db)
+        departments = [
+            {
+                "name": d.name,
+                "description": d.description,
+                "group_jid": d.group_jid,
+            }
+            for d in db.query(Department).filter(Department.active == True).all()
+        ]
+        text = log.text or ""
+        from_number = log.from_number
+        media_key = log.media_key or None
+
+        try:
+            if media_key:
+                _add_step(log, "baixando mídia (áudio)")
+                db.commit()
+                audio_b64 = await evolution.get_media_base64(log.media_message_id or media_key)
+                if not audio_b64:
+                    raise llm.LlmError("Mídia não encontrada para transcrever")
+                _add_step(log, "transcrevendo áudio")
+                db.commit()
+                text = await llm.transcribe_audio(audio_b64, config)
+                log.text = text
+                _add_step(log, "áudio transcrito", detail=text[:80])
+                db.commit()
+
+            _add_step(log, "classificando com a LLM")
+            db.commit()
+            result = await llm.classify_and_reply(text, departments, config)
+        except (evolution.EvolutionError, llm.LlmError) as exc:
+            log.status = "failed"
+            log.error = str(exc)
+            _add_step(log, "falha", status="error", detail=str(exc))
+            db.commit()
+            return
+        except Exception as exc:
+            logger.exception("Erro inesperado ao processar mensagem %s de %s", log_id, from_number)
+            log.status = "failed"
+            log.error = str(exc)
+            _add_step(log, "erro inesperado", status="error", detail=str(exc))
+            db.commit()
+            return
+
+        department_name = result["department"]
+        reply = result["reply"]
+        matched = next((d for d in departments if d["name"].lower() == department_name.lower()), None)
+        matched_dep = None
+        if matched:
+            matched_dep = db.query(Department).filter(Department.name == matched["name"]).first()
+
+        log.department_name = department_name
+        log.department_id = matched_dep.id if matched_dep else None
+        log.llm_reply = reply
+        log.status = "routed"
+        _add_step(log, "classificado", detail=f"departamento: {department_name}")
+        db.commit()
+
+        # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo configurado
+        if matched and matched.get("group_jid"):
+            group_text = (
+                f"NOVA MENSAGEM PARA {matched['name'].upper()}\n"
+                f"De: {from_number}\n\n{text}"
+            )
+            try:
+                await evolution.send_text(matched["group_jid"], group_text)
+                _add_step(log, "encaminhado para o grupo", detail=matched["group_jid"])
+            except evolution.EvolutionError as exc:
+                logger.error("Falha ao encaminhar para o grupo %s: %s", matched["group_jid"], exc)
+                log.error = log.error or ""
+                log.error += f" | grupo: {exc}"
+                log.status = "routed_with_error"
+                _add_step(log, "falha ao encaminhar ao grupo", status="error", detail=str(exc))
+
+        # 2) Envia a resposta da LLM de volta para o membro
+        if reply:
+            try:
+                await evolution.send_text(f"{from_number}@s.whatsapp.net", reply)
+                _add_step(log, "resposta enviada ao membro")
+            except evolution.EvolutionError as exc:
+                logger.error("Falha ao responder %s: %s", from_number, exc)
+                log.error = log.error or ""
+                log.error += f" | resposta: {exc}"
+                log.status = "routed_with_error"
+                _add_step(log, "falha ao enviar resposta", status="error", detail=str(exc))
+
+        db.commit()
+        logger.info("Mensagem %s processada (%s)", log_id, department_name)
+    except Exception:
+        logger.exception("Erro inesperado na tarefa em segundo plano da mensagem %s", log_id)
+    finally:
+        db.close()
 
 
 @router.post("/evolution")
@@ -100,7 +211,9 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     if from_me or not remote_jid.endswith("@s.whatsapp.net"):
         return {"ok": True, "skipped": "not_private_or_from_me"}
 
-    config = get_or_create_config(db)
+    message_id = key.get("id") or ""
+    if _dedup(message_id):
+        return {"ok": True, "skipped": "duplicate"}
 
     text = _extract_text(data)
     media_key = None
@@ -108,22 +221,12 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
         text = ""
         msg = data.get("message") or {}
         audio = msg.get("audioMessage") or msg.get("ptvMessage") or msg.get("voiceMessage") or {}
-        media_key = audio.get("mediaKey") or key.get("id")
+        media_key = audio.get("mediaKey") or message_id
 
     if not text and not media_key:
         return {"ok": True, "skipped": "no_text"}
 
     from_number = _normalize_jid(remote_jid)
-
-    config = get_or_create_config(db)
-    departments = [
-        {
-            "name": d.name,
-            "description": d.description,
-            "group_jid": d.group_jid,
-        }
-        for d in db.query(Department).filter(Department.active == True).all()
-    ]
 
     log = MessageLog(
         direction="in",
@@ -131,6 +234,8 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
         to_jid=settings.evolution_instance,
         text=text,
         status="received",
+        media_key=media_key or None,
+        media_message_id=message_id or None,
     )
     db.add(log)
     db.commit()
@@ -138,80 +243,10 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     _add_step(log, "mensagem recebida")
     db.commit()
-    logger.info("Mensagem recebida de %s: %s", from_number, text[:80])
+    logger.info("Mensagem %s recebida de %s: %s", log.id, from_number, text[:80] or "(áudio)")
 
-    try:
-        if media_key:
-            _add_step(log, "baixando mídia (áudio)")
-            db.commit()
-            audio_b64 = await evolution.get_media_base64(key.get("id"))
-            if not audio_b64:
-                raise llm.LlmError("Mídia não encontrada para transcrever")
-            _add_step(log, "transcrevendo áudio")
-            db.commit()
-            text = await llm.transcribe_audio(audio_b64, config)
-            log.text = text
-            _add_step(log, "áudio transcrito", detail=text[:80])
-            db.commit()
+    # Processa em segundo plano para responder 200 imediatamente
+    # (a Evolution espera resposta em até 60s; áudio/transcrição podem demorar mais).
+    asyncio.create_task(_process_message(log.id))
 
-        _add_step(log, "classificando com a LLM")
-        db.commit()
-        result = await llm.classify_and_reply(text, departments, config)
-    except (evolution.EvolutionError, llm.LlmError) as exc:
-        log.status = "failed"
-        log.error = str(exc)
-        _add_step(log, "falha", status="error", detail=str(exc))
-        db.commit()
-        return {"ok": True, "error": str(exc)}
-    except Exception as exc:  # nunca responder 500: registra e encerra
-        logger.exception("Erro inesperado ao processar mensagem de %s", from_number)
-        log.status = "failed"
-        log.error = str(exc)
-        _add_step(log, "erro inesperado", status="error", detail=str(exc))
-        db.commit()
-        return {"ok": True, "error": str(exc)}
-
-    department_name = result["department"]
-    reply = result["reply"]
-    matched = next((d for d in departments if d["name"].lower() == department_name.lower()), None)
-    matched_dep = None
-    if matched:
-        matched_dep = db.query(Department).filter(Department.name == matched["name"]).first()
-
-    log.department_name = department_name
-    log.department_id = matched_dep.id if matched_dep else None
-    log.llm_reply = reply
-    log.status = "routed"
-    _add_step(log, "classificado", detail=f"departamento: {department_name}")
-    db.commit()
-
-    # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo configurado
-    if matched and matched.get("group_jid"):
-        group_text = (
-            f"NOVA MENSAGEM PARA {matched['name'].upper()}\n"
-            f"De: {from_number}\n\n{text}"
-        )
-        try:
-            await evolution.send_text(matched["group_jid"], group_text)
-            _add_step(log, "encaminhado para o grupo", detail=matched["group_jid"])
-        except evolution.EvolutionError as exc:
-            logger.error("Falha ao encaminhar para o grupo %s: %s", matched["group_jid"], exc)
-            log.error = log.error or ""
-            log.error += f" | grupo: {exc}"
-            log.status = "routed_with_error"
-            _add_step(log, "falha ao encaminhar ao grupo", status="error", detail=str(exc))
-
-    # 2) Envia a resposta da LLM de volta para o membro
-    if reply:
-        try:
-            await evolution.send_text(f"{from_number}@s.whatsapp.net", reply)
-            _add_step(log, "resposta enviada ao membro")
-        except evolution.EvolutionError as exc:
-            logger.error("Falha ao responder %s: %s", from_number, exc)
-            log.error = log.error or ""
-            log.error += f" | resposta: {exc}"
-            log.status = "routed_with_error"
-            _add_step(log, "falha ao enviar resposta", status="error", detail=str(exc))
-
-    db.commit()
-    return {"ok": True, "department": department_name}
+    return {"ok": True, "processing": True}

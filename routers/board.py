@@ -129,15 +129,15 @@ async def evolution_qrcode():
 async def status(db: Session = Depends(get_db)):
     config = get_or_create_config(db)
     result = ServiceStatus(
-        ollama="desconhecido",
+        llm="desconhecido",
         evolution="desconhecido",
         llm_model=config.model,
         instance=settings.evolution_instance,
     )
     try:
-        result.ollama = "ok" if await llm.ping(config.base_url, config.model, config.api_key) else "offline"
+        result.llm = "ok" if await llm.ping(config.base_url, config.model, config.api_key) else "offline"
     except Exception:
-        result.ollama = "offline"
+        result.llm = "offline"
     try:
         state = await evolution.ping()
         result.evolution = "ok" if state == "open" else (state or "offline")

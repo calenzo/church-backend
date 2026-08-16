@@ -38,14 +38,6 @@ services:
       - redis
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollamadata:/root/.ollama
-    restart: unless-stopped
-
   backend:
     build: .
     ports:
@@ -55,11 +47,9 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/church
       EVOLUTION_BASE_URL: http://evolution:8080
-      LLM_BASE_URL: http://ollama:11434
     depends_on:
       - postgres
     restart: unless-stopped
 
 volumes:
   pgdata:
-  ollamadata:

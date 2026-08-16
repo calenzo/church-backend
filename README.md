@@ -4,8 +4,8 @@ Quando um número qualquer manda mensagem para o contato da igreja no WhatsApp,
 o assistente:
 
 1. Recebe a mensagem via **Evolution API** (webhook).
-2. Usa uma **LLM (Ollama)** para classificar a mensagem no departamento certo
-   e gerar uma resposta para o membro.
+2. Usa uma **LLM online** (API compatível com OpenAI) para classificar a
+   mensagem no departamento certo e gerar uma resposta para o membro.
 3. Encaminha a mensagem para o **grupo do departamento** correspondente
    (ex.: Louvor, Juventude, Crianças) e responde o membro de volta.
 
@@ -18,7 +18,7 @@ a LLM, os departamentos com seus grupos, e acompanhar o log de mensagens.
 ## Arquitetura
 
 ```
-[WhatsApp] <-> [Evolution API] <-> [Backend FastAPI] <-> [Ollama (LLM)]
+[WhatsApp] <-> [Evolution API] <-> [Backend FastAPI] <-> [LLM online (OpenAI-compatível)]
                                         |
                                    [Postgres] + [Board React]
 ```
@@ -28,14 +28,17 @@ a LLM, os departamentos com seus grupos, e acompanhar o log de mensagens.
 
 ## Subir tudo com Docker (recomendado)
 
-Um único `docker compose` sobe Postgres, Redis, Evolution API, Ollama e o backend:
+Um único `docker compose` sobe Postgres, Redis, Evolution API e o backend:
 
 ```bash
 cd backend
-cp .env.example .env        # edite EVOLUTION_API_KEY com a chave da sua instância
+cp .env.example .env        # edite EVOLUTION_API_KEY e as configs da LLM online
 docker compose up -d --build
-docker compose exec ollama ollama pull llama3.1    # baixa o modelo
 ```
+
+> A LLM é consumida **online** (ex.: OpenAI, Groq, Mistral). Configure
+> `LLM_BASE_URL`, `LLM_MODEL` e `LLM_API_KEY` no `.env` — o backend exige
+> acesso à internet para funcionar.
 
 O backend sobe em `http://localhost:8000` (docs em `/docs`) usando Postgres
 (bancos `evolution` e `church` no mesmo container Postgres).
@@ -56,6 +59,28 @@ make up      # docker compose up -d --build
 make logs    # docker compose logs -f
 make down    # docker compose down
 ```
+
+## Deploy no Render
+
+O Render **não executa o docker-compose**. Use o `render.yaml` (Blueprint),
+que cria o Web Service do backend (via Dockerfile) + um Postgres gerenciado.
+
+1. Envie este repositório para o GitHub e ajuste o campo `repo` em `render.yaml`.
+2. Em https://dashboard.render.com/blueprints, cole a URL do repositório.
+3. Preencha no dashboard os segredos marcados com `sync: false`:
+   - `EVOLUTION_BASE_URL` — URL **pública** da sua Evolution API
+     (ex.: `http://SEU-IP:8080`), pois o Render não enxerga redes internas.
+   - `EVOLUTION_API_KEY` — a global `AUTHENTICATION_API_KEY` da Evolution.
+   - `LLM_API_KEY` — chave do provedor da LLM online.
+   - `WEBHOOK_TOKEN` — token opcional para validar o webhook.
+4. Aponte o webhook da Evolution para a URL pública do Render:
+   `https://<church-backend>.onrender.com/webhook/evolution`.
+
+Observações:
+- O `DATABASE_URL` é injetado automaticamente pelo Render Postgres
+  (o backend normaliza `postgresql://` para o driver psycopg no `database.py`).
+- A porta do Render (`$PORT`) é respeitada pelo Dockerfile (`${PORT:-8000}`).
+- Evolution API e Redis continuam rodando fora do Render.
 
 ## Backend sem Docker (desenvolvimento)
 
@@ -81,9 +106,9 @@ altere `DATABASE_URL` no `.env` (ex.: `postgresql+psycopg://postgres:postgres@lo
 | `EVOLUTION_API_KEY` | A global `AUTHENTICATION_API_KEY` da Evolution |
 | `EVOLUTION_INSTANCE` | Nome da instância (padrão `church`) |
 | `WEBHOOK_TOKEN` | Token opcional para validar o webhook |
-| `LLM_BASE_URL` | URL do Ollama (Docker: `http://ollama:11434`) |
-| `LLM_MODEL` | Modelo (ex.: `llama3.1`) |
-| `LLM_API_KEY` | API key opcional para provedores OpenAI-compatíveis |
+| `LLM_BASE_URL` | URL da API online compatível com OpenAI (ex.: `https://api.openai.com/v1`) |
+| `LLM_MODEL` | Modelo (ex.: `gpt-4o-mini`) |
+| `LLM_API_KEY` | Chave da API do provedor (obrigatória — LLM online) |
 | `LLM_TEMPERATURE` | Temperatura da LLM |
 
 ## Frontend

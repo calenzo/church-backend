@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # Token opcional para validar chamadas do webhook da Evolution
     webhook_token: str = ""
 
-    # LLM (Ollama ou qualquer API compatível com OpenAI)
+    # LLM (API online compatível com OpenAI)
     llm_base_url: str = "http://localhost:11434"
     llm_model: str = "llama3.1"
     llm_api_key: str = ""

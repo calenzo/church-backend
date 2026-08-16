@@ -66,7 +66,7 @@ class MessageOut(BaseModel):
 
 
 class ServiceStatus(BaseModel):
-    ollama: str
+    llm: str
     evolution: str
     llm_model: str = ""
     instance: str = ""

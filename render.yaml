@@ -44,10 +44,11 @@ services:
         value: "true"
       - key: DATABASE_PROVIDER
         value: postgresql
+      # Apontar para uma database "evolution" no MESMO Postgres do backend
+      # (só há 1 Postgres free por workspace). Pegue a connection string do
+      # church-postgres e troque o nome do banco para "evolution".
       - key: DATABASE_CONNECTION_URI
-        fromDatabase:
-          name: evolution-postgres
-          property: connectionString
+        sync: false
       - key: DATABASE_SAVE_DATA_INSTANCE
         value: "true"
       - key: DATABASE_SAVE_DATA_NEW_MESSAGE
@@ -67,9 +68,4 @@ databases:
   - name: church-postgres
     databaseName: church
     user: church
-    plan: free
-
-  - name: evolution-postgres
-    databaseName: evolution
-    user: evolution
     plan: free

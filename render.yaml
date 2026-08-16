@@ -17,9 +17,8 @@ services:
         fromDatabase:
           name: church-postgres
           property: connectionString
-      # URL pública da Evolution API (ex.: http://SEU-IP:8080 ou https://sub.dominio)
       - key: EVOLUTION_BASE_URL
-        sync: false
+        value: https://church-evolution.onrender.com
       - key: EVOLUTION_API_KEY
         sync: false
       - key: EVOLUTION_INSTANCE
@@ -33,8 +32,44 @@ services:
       - key: LLM_API_KEY
         sync: false
 
+  - type: web
+    name: church-evolution
+    runtime: image
+    image:
+      url: docker.io/evoapicloud/evolution-api:latest
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_ENABLED
+        value: "true"
+      - key: DATABASE_PROVIDER
+        value: postgresql
+      - key: DATABASE_CONNECTION_URI
+        fromDatabase:
+          name: evolution-postgres
+          property: connectionString
+      - key: DATABASE_SAVE_DATA_INSTANCE
+        value: "true"
+      - key: DATABASE_SAVE_DATA_NEW_MESSAGE
+        value: "true"
+      - key: DATABASE_SAVE_MESSAGE_UPDATE
+        value: "true"
+      - key: CACHE_REDIS_ENABLED
+        value: "false"
+      - key: AUTHENTICATION_API_KEY
+        sync: false
+      - key: WEBHOOK_GLOBAL_ENABLED
+        value: "true"
+      - key: WEBHOOK_GLOBAL_URL
+        value: https://church-backend-vzzp.onrender.com/webhook/evolution
+
 databases:
   - name: church-postgres
     databaseName: church
     user: church
+    plan: free
+
+  - name: evolution-postgres
+    databaseName: evolution
+    user: evolution
     plan: free

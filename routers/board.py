@@ -109,9 +109,9 @@ def list_messages(limit: int = 100, db: Session = Depends(get_db)):
 
 
 @router.get("/evolution/groups", response_model=list[dict])
-async def evolution_groups():
+async def evolution_groups(refresh: bool = False):
     try:
-        return await evolution.list_groups()
+        return await evolution.list_groups(force_refresh=refresh)
     except EvolutionError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 

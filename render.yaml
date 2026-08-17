@@ -36,25 +36,14 @@ services:
     name: church-evolution
     runtime: image
     image:
-      url: docker.io/evoapicloud/evolution-api:latest
+      url: docker.io/atendai/evolution-api-lite:latest
     plan: free
     healthCheckPath: /
     envVars:
-      - key: DATABASE_ENABLED
-        value: "true"
       - key: DATABASE_PROVIDER
         value: postgresql
-      # Apontar para uma database "evolution" no MESMO Postgres do backend
-      # (só há 1 Postgres free por workspace). Pegue a connection string do
-      # church-postgres e troque o nome do banco para "evolution".
       - key: DATABASE_CONNECTION_URI
         sync: false
-      - key: DATABASE_SAVE_DATA_INSTANCE
-        value: "true"
-      - key: DATABASE_SAVE_DATA_NEW_MESSAGE
-        value: "true"
-      - key: DATABASE_SAVE_MESSAGE_UPDATE
-        value: "true"
       - key: CACHE_REDIS_ENABLED
         value: "false"
       - key: AUTHENTICATION_API_KEY

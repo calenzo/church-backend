@@ -112,7 +112,12 @@ async def _process_message(log_id: int):
             if media_key:
                 _add_step(log, "baixando mídia (áudio)")
                 db.commit()
-                audio_b64 = await evolution.get_media_base64(log.media_message_id or media_key)
+                remote_jid = f"{from_number}@s.whatsapp.net"
+                audio_b64 = await evolution.get_media_base64(
+                    message_id=log.media_message_id or media_key,
+                    remote_jid=remote_jid,
+                    from_me=False,
+                )
                 if not audio_b64:
                     raise llm.LlmError("Mídia não encontrada para transcrever")
                 _add_step(log, "transcrevendo áudio")

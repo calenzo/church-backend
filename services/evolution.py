@@ -60,18 +60,32 @@ async def get_qrcode() -> str | None:
         raise EvolutionError(f"Falha ao obter QR code da Evolution API: {exc}") from exc
 
 
-async def get_media_base64(message_id: str, convert_to_mp4: bool = True) -> str | None:
-    """Baixa a mídia de uma mensagem recebida e retorna o base64."""
+async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False) -> str | None:
+    """Baixa a mídia de uma mensagem recebida e retorna o base64 (sem prefixo data URI)."""
     url = f"{settings.evolution_base_url.rstrip('/')}/chat/getBase64FromMediaMessage/{settings.evolution_instance}"
-    payload = {"message": {"key": {"id": message_id}}, "convertToMp4": convert_to_mp4}
+    payload = {
+        "message": {
+            "key": {
+                "id": message_id,
+                "remoteJid": remote_jid,
+                "fromMe": from_me,
+            }
+        },
+        "convertToMp4": convert_to_mp4,
+    }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(url, json=payload, headers=_headers())
             resp.raise_for_status()
             data = resp.json()
+        b64 = None
         if isinstance(data, str):
-            return data
-        return data.get("base64") or data.get("media") or data.get("file")
+            b64 = data
+        else:
+            b64 = data.get("base64") or data.get("media") or data.get("file")
+        if b64 and "," in b64 and b64.startswith("data:"):
+            b64 = b64.split(",", 1)[1]
+        return b64
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao baixar mídia da Evolution API: {exc}") from exc
 

@@ -116,6 +116,46 @@ async def evolution_groups():
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@router.get("/evolution/debug")
+async def evolution_debug():
+    """Endpoint de diagnóstico para verificar a conexão com a Evolution API."""
+    import httpx as _httpx
+    results: dict = {}
+    base = settings.evolution_base_url.rstrip("/")
+    inst = settings.evolution_instance
+    headers = evolution._headers()
+
+    # 1. Ping / connectionState
+    try:
+        async with _httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{base}/instance/connectionState/{inst}", headers=headers)
+            results["connectionState"] = {"status": r.status_code, "body": r.json()}
+    except Exception as e:
+        results["connectionState"] = {"error": str(e)}
+
+    # 2. fetchAllGroups (raw)
+    try:
+        async with _httpx.AsyncClient(timeout=30) as c:
+            r = await c.get(
+                f"{base}/group/fetchAllGroups/{inst}",
+                params={"getParticipants": "false"},
+                headers=headers,
+            )
+            results["fetchAllGroups"] = {"status": r.status_code, "body": r.json() if r.status_code == 200 else r.text[:500]}
+    except Exception as e:
+        results["fetchAllGroups"] = {"error": str(e)}
+
+    # 3. Informações da instância
+    try:
+        async with _httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{base}/instance/fetchInstances", headers=headers)
+            results["fetchInstances"] = {"status": r.status_code, "body": r.json() if r.status_code == 200 else r.text[:500]}
+    except Exception as e:
+        results["fetchInstances"] = {"error": str(e)}
+
+    return results
+
+
 @router.get("/evolution/qrcode", response_model=dict)
 async def evolution_qrcode():
     try:

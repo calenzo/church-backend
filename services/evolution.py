@@ -35,9 +35,26 @@ async def list_groups() -> list[dict]:
             resp = await client.get(url, params={"getParticipants": "false"}, headers=_headers())
             resp.raise_for_status()
             data = resp.json()
-        return [{"id": g.get("id"), "subject": g.get("subject") or g.get("id")} for g in data]
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao listar grupos da Evolution API: {exc}") from exc
+    except Exception as exc:
+        raise EvolutionError(f"Resposta inválida da Evolution API ao listar grupos: {exc}") from exc
+
+    # Evolution API v2 pode retornar {"groups": [...]} ou [...]
+    groups_raw: list[dict] = []
+    if isinstance(data, list):
+        groups_raw = data
+    elif isinstance(data, dict):
+        groups_raw = data.get("groups") or data.get("instances") or []
+    else:
+        raise EvolutionError(f"Formato inesperado da Evolution API: {type(data).__name__}")
+
+    result = []
+    for g in groups_raw:
+        if not isinstance(g, dict):
+            continue
+        result.append({"id": g.get("id"), "subject": g.get("subject") or g.get("id")})
+    return result
 
 
 async def get_qrcode() -> str | None:

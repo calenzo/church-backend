@@ -138,6 +138,7 @@ async def get_pairing_code(number: str) -> str | None:
         state = await ping()
     except EvolutionError:
         raise
+    logger.info("get_pairing_code: connection state = %s", state)
     if state == "open":
         return None
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
@@ -146,7 +147,13 @@ async def get_pairing_code(number: str) -> str | None:
             resp = await client.get(url, params={"number": number}, headers=_headers())
             resp.raise_for_status()
             data = resp.json()
-            pairing = data.get("pairingCode") or (data.get("qrcode") or {}).get("pairingCode")
+            logger.info("Evolution connect response for pairing: %s", data)
+            pairing = (
+                data.get("pairingCode")
+                or data.get("code")
+                or (data.get("qrcode") or {}).get("pairingCode")
+                or data.get("instance", {}).get("pairingCode")
+            )
             return pairing
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao obter código de pareamento: {exc}") from exc

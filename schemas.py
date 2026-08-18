@@ -78,3 +78,7 @@ class ServiceStatus(BaseModel):
 class TestSendIn(BaseModel):
     number: str = Field(min_length=1, description="Número/JID de destino")
     text: str = Field(min_length=1)
+
+
+class PairingCodeIn(BaseModel):
+    number: str = Field(min_length=1, description="Número no formato 5511999999999")

@@ -131,6 +131,27 @@ async def get_qrcode() -> str | None:
         raise EvolutionError(f"Falha ao obter QR code da Evolution API: {exc}") from exc
 
 
+async def get_pairing_code(number: str) -> str | None:
+    """Retorna um código de pareamento (ex: ABCD-EFGH) para conectar sem QR code.
+    O número deve estar no formato 5511999999999 (código do país + DDD + número)."""
+    try:
+        state = await ping()
+    except EvolutionError:
+        raise
+    if state == "open":
+        return None
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params={"number": number}, headers=_headers())
+            resp.raise_for_status()
+            data = resp.json()
+            pairing = data.get("pairingCode") or (data.get("qrcode") or {}).get("pairingCode")
+            return pairing
+    except httpx.HTTPError as exc:
+        raise EvolutionError(f"Falha ao obter código de pareamento: {exc}") from exc
+
+
 async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, max_retries: int = 3) -> str | None:
     """Baixa a mídia de uma mensagem recebida e retorna o base64 (sem prefixo data URI).
     Inclui retry com backoff para lidar com cold-start da Evolution API."""

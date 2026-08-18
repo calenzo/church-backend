@@ -12,6 +12,7 @@ from schemas import (
     LlmConfigIn,
     LlmConfigOut,
     MessageOut,
+    PairingCodeIn,
     ServiceStatus,
     TestSendIn,
 )
@@ -163,6 +164,72 @@ async def evolution_qrcode():
         return {"ok": True, "qrcode": qr}
     except EvolutionError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/evolution/pairing-code", response_model=dict)
+async def evolution_pairing_code(data: PairingCodeIn):
+    """Gera um código de pareamento numérico para conectar sem QR code.
+    O número deve estar no formato 5511999999999."""
+    try:
+        code = await evolution.get_pairing_code(data.number)
+        return {"ok": True, "pairingCode": code}
+    except EvolutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/qr")
+async def qr_page():
+    """Página HTML com o QR code para escanear com o celular."""
+    from fastapi.responses import HTMLResponse
+
+    try:
+        qr_b64 = await evolution.get_qrcode()
+    except EvolutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if not qr_b64:
+        return HTMLResponse(
+            "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
+            "<h2>WhatsApp já conectado</h2>"
+            "<p>A instância já está ativa. Não é necessário escanear QR code.</p>"
+            "</body></html>"
+        )
+
+    img_src = qr_b64 if qr_b64.startswith("data:") else f"data:image/png;base64,{qr_b64}"
+
+    return HTMLResponse(f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>WhatsApp QR Code</title>
+        <style>
+            body {{ font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #f5f5f5; }}
+            .card {{ background: white; border-radius: 12px; padding: 24px; max-width: 400px; margin: 20px auto; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+            img {{ max-width: 100%; border-radius: 8px; }}
+            h2 {{ color: #333; margin-bottom: 8px; }}
+            p {{ color: #666; font-size: 14px; }}
+            .step {{ text-align: left; background: #f0f7ff; padding: 12px 16px; border-radius: 8px; margin-top: 16px; font-size: 13px; color: #333; }}
+            .step strong {{ color: #075e54; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>Conectar WhatsApp</h2>
+            <p>Escaneie o QR Code abaixo com seu celular</p>
+            <img src="{img_src}" alt="QR Code WhatsApp" />
+            <div class="step">
+                <strong>Como escanear:</strong><br>
+                1. Abra o WhatsApp no celular<br>
+                2. Vá em <em>Aparelhos conectados</em><br>
+                3. Toque em <em>Conectar aparelho</em><br>
+                4. Aponte a câmera para o QR Code acima
+            </div>
+        </div>
+    </body>
+    </html>
+    """)
 
 
 @router.get("/status", response_model=ServiceStatus)

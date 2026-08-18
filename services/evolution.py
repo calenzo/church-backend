@@ -143,10 +143,23 @@ async def _restart_instance() -> None:
         logger.warning("Falha ao reiniciar instância: %s", exc)
 
 
+async def _logout_instance() -> None:
+    """Faz logout da instância para limpar credenciais salvas.
+    Necessário para que o pairing code funcione (a instância não pode estar 'registered')."""
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/logout/{settings.evolution_instance}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.delete(url, headers=_headers())
+            resp.raise_for_status()
+            logger.info("Logout da instância realizado com sucesso")
+    except httpx.HTTPError as exc:
+        logger.warning("Falha ao fazer logout da instância: %s", exc)
+
+
 async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
     """Retorna dados de conexão: pairingCode e/ou QR code (base64).
     O número deve estar no formato 5511999999999 (código do país + DDD + número).
-    Reinicia a instância antes de solicitar o código para garantir um estado limpo."""
+    Faz logout da instância antes para limpar credenciais e permitir pairing code."""
     try:
         state = await ping()
     except EvolutionError:
@@ -155,8 +168,8 @@ async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
     if state == "open":
         return {"connected": True}
 
-    await _restart_instance()
-    await asyncio.sleep(5)
+    await _logout_instance()
+    await asyncio.sleep(3)
 
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
     last_error: Exception | None = None

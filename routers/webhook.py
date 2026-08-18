@@ -247,6 +247,7 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     # Processa em segundo plano para responder 200 imediatamente
     # (a Evolution espera resposta em até 60s; áudio/transcrição podem demorar mais).
-    asyncio.create_task(_process_message(log.id))
+    task = asyncio.create_task(_process_message(log.id))
+    task.add_done_callback(lambda t: logger.error("Background task failed: %s", t.exception()) if t.exception() else None)
 
     return {"ok": True, "processing": True}

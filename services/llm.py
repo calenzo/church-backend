@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import io
 import json
@@ -7,9 +6,6 @@ import re
 import httpx
 
 from config import settings
-
-_whisper_model = None
-_whisper_model_name = None
 
 DEFAULT_SYSTEM_PROMPT = """Você é o assistente virtual de atendimento da igreja no WhatsApp.
 
@@ -105,37 +101,29 @@ async def classify_and_reply(message: str, departments: list[dict], config) -> d
 
 
 async def transcribe_audio(audio_b64: str, config, mime_type: str = "audio/ogg") -> str:
-    """Transcreve um áudio (base64) localmente com faster-whisper."""
-    global _whisper_model, _whisper_model_name
-
-    model_name = getattr(config, "stt_model", "") or settings.llm_stt_model
-    if _whisper_model is None or _whisper_model_name != model_name:
-        try:
-            from faster_whisper import WhisperModel
-
-            _whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
-            _whisper_model_name = model_name
-        except (ImportError, RuntimeError, OSError) as exc:
-            raise LlmError(
-                f"Não foi possível carregar o modelo de transcrição '{model_name}'. "
-                f"Verifique se faster-whisper está instalado e o modelo baixável: {exc}"
-            ) from exc
+    """Transcreve um áudio (base64) via API OpenAI Whisper."""
+    base = _normalize_base(config.base_url)
+    url = base + "/v1/audio/transcriptions"
 
     audio_bytes = base64.b64decode(audio_b64)
 
-    def _run():
-        segments, _info = _whisper_model.transcribe(
-            io.BytesIO(audio_bytes),
-            language="pt",
-            vad_filter=True,
-        )
-        return "".join(seg.text for seg in segments).strip()
+    headers = {}
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
+
+    ext = "ogg" if "ogg" in mime_type else ("mp3" if "mp3" in mime_type else "wav")
+    files = {"file": (f"audio.{ext}", io.BytesIO(audio_bytes), mime_type)}
+    data = {"model": "whisper-1", "language": "pt"}
 
     try:
-        text = await asyncio.to_thread(_run)
-    except Exception as exc:
-        raise LlmError(f"Falha ao transcrever áudio: {exc}") from exc
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, files=files, data=data, headers=headers)
+            resp.raise_for_status()
+            result = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise LlmError(f"Falha ao transcrever áudio via API: {exc}") from exc
 
+    text = (result.get("text") or "").strip()
     if not text:
         raise LlmError("Transcrição retornou texto vazio")
     return text

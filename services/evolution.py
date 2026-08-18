@@ -24,17 +24,24 @@ def _headers() -> dict:
     return headers
 
 
-async def send_text(number: str, text: str) -> dict:
-    """Envia mensagem de texto via Evolution API para um número ou grupo (JID)."""
+async def send_text(number: str, text: str, max_retries: int = 3) -> dict:
+    """Envia mensagem de texto via Evolution API para um número ou grupo (JID).
+    Inclui retry com backoff para lidar com cold-start da Evolution API."""
     url = f"{settings.evolution_base_url.rstrip('/')}/message/sendText/{settings.evolution_instance}"
     payload = {"number": number, "text": text}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=payload, headers=_headers())
-            resp.raise_for_status()
-            return resp.json()
-    except httpx.HTTPError as exc:
-        raise EvolutionError(f"Falha ao enviar mensagem pela Evolution API: {exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, json=payload, headers=_headers())
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < max_retries - 1:
+                logger.warning("send_text attempt %d/%d failed: %s", attempt + 1, max_retries, exc)
+                await asyncio.sleep(2 ** attempt * 2)
+    raise EvolutionError(f"Falha ao enviar mensagem após {max_retries} tentativas: {last_error}")
 
 
 async def list_groups(max_retries: int = 3, force_refresh: bool = False) -> list[dict]:
@@ -124,8 +131,9 @@ async def get_qrcode() -> str | None:
         raise EvolutionError(f"Falha ao obter QR code da Evolution API: {exc}") from exc
 
 
-async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False) -> str | None:
-    """Baixa a mídia de uma mensagem recebida e retorna o base64 (sem prefixo data URI)."""
+async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, max_retries: int = 3) -> str | None:
+    """Baixa a mídia de uma mensagem recebida e retorna o base64 (sem prefixo data URI).
+    Inclui retry com backoff para lidar com cold-start da Evolution API."""
     url = f"{settings.evolution_base_url.rstrip('/')}/chat/getBase64FromMediaMessage/{settings.evolution_instance}"
     payload = {
         "message": {
@@ -137,31 +145,42 @@ async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool 
         },
         "convertToMp4": convert_to_mp4,
     }
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=payload, headers=_headers())
-            resp.raise_for_status()
-            data = resp.json()
-        b64 = None
-        if isinstance(data, str):
-            b64 = data
-        else:
-            b64 = data.get("base64") or data.get("media") or data.get("file")
-        if b64 and "," in b64 and b64.startswith("data:"):
-            b64 = b64.split(",", 1)[1]
-        return b64
-    except httpx.HTTPError as exc:
-        raise EvolutionError(f"Falha ao baixar mídia da Evolution API: {exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, json=payload, headers=_headers())
+                resp.raise_for_status()
+                data = resp.json()
+            b64 = None
+            if isinstance(data, str):
+                b64 = data
+            else:
+                b64 = data.get("base64") or data.get("media") or data.get("file")
+            if b64 and "," in b64 and b64.startswith("data:"):
+                b64 = b64.split(",", 1)[1]
+            return b64
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < max_retries - 1:
+                logger.warning("get_media_base64 attempt %d/%d failed: %s", attempt + 1, max_retries, exc)
+                await asyncio.sleep(2 ** attempt * 2)
+    raise EvolutionError(f"Falha ao baixar mídia após {max_retries} tentativas: {last_error}")
 
 
-async def ping() -> str:
+async def ping(max_retries: int = 2) -> str:
     """Verifica se a instância da Evolution API está conectada."""
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connectionState/{settings.evolution_instance}"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, headers=_headers())
-            resp.raise_for_status()
-            state = resp.json().get("instance", {}).get("state", "unknown")
-            return state
-    except httpx.HTTPError as exc:
-        raise EvolutionError(f"Evolution API indisponível: {exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url, headers=_headers())
+                resp.raise_for_status()
+                state = resp.json().get("instance", {}).get("state", "unknown")
+                return state
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+    raise EvolutionError(f"Evolution API indisponível após {max_retries} tentativas: {last_error}")

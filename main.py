@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +9,13 @@ from sqlalchemy import text
 from config import settings
 from database import Base, engine
 from routers import board, webhook
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -19,7 +28,10 @@ async def lifespan(app: FastAPI):
                 conn.execute(text(f"ALTER TABLE message_log ADD COLUMN IF NOT EXISTS {column}"))
         except Exception:
             pass
+    logger.info("Backend iniciado com sucesso")
     yield
+    logger.info("Backend desligando (SIGTERM recebido)")
+    engine.dispose()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

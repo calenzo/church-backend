@@ -36,7 +36,7 @@ services:
     name: church-evolution
     runtime: image
     image:
-      url: docker.io/atendai/evolution-api-lite:latest
+      url: docker.io/evoapicloud/evolution-api:latest
     plan: free
     healthCheckPath: /
     envVars:
@@ -58,3 +58,14 @@ databases:
     databaseName: church
     user: church
     plan: free
+
+  - type: cron
+    name: church-keepalive
+    runtime: python
+    plan: free
+    schedule: "*/10 * * * *"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+    buildCommand: pip install httpx
+    startCommand: python -c "import httpx; httpx.get('https://church-backend-vzzp.onrender.com/'); httpx.get('https://church-evolution.onrender.com/')"

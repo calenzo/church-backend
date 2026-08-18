@@ -131,9 +131,22 @@ async def get_qrcode() -> str | None:
         raise EvolutionError(f"Falha ao obter QR code da Evolution API: {exc}") from exc
 
 
-async def get_pairing_code(number: str) -> str | None:
+async def _restart_instance() -> None:
+    """Reinicia a instância da Evolution API (necessário para gerar pairing code)."""
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/restart/{settings.evolution_instance}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.put(url, headers=_headers())
+            resp.raise_for_status()
+            logger.info("Instância reiniciada com sucesso")
+    except httpx.HTTPError as exc:
+        logger.warning("Falha ao reiniciar instância: %s", exc)
+
+
+async def get_pairing_code(number: str, max_retries: int = 3) -> str | None:
     """Retorna um código de pareamento (ex: ABCD-EFGH) para conectar sem QR code.
-    O número deve estar no formato 5511999999999 (código do país + DDD + número)."""
+    O número deve estar no formato 5511999999999 (código do país + DDD + número).
+    Reinicia a instância antes de solicitar o código para garantir um estado limpo."""
     try:
         state = await ping()
     except EvolutionError:
@@ -141,17 +154,28 @@ async def get_pairing_code(number: str) -> str | None:
     logger.info("get_pairing_code: connection state = %s", state)
     if state == "open":
         return None
+
+    await _restart_instance()
+    await asyncio.sleep(5)
+
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json={"number": number}, headers=_headers())
-            resp.raise_for_status()
-            data = resp.json()
-            logger.info("Evolution connect response for pairing: %s", data)
-            pairing = data.get("pairingCode") or (data.get("qrcode") or {}).get("pairingCode")
-            return pairing
-    except httpx.HTTPError as exc:
-        raise EvolutionError(f"Falha ao obter código de pareamento: {exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url, params={"number": number}, headers=_headers())
+                resp.raise_for_status()
+                data = resp.json()
+                logger.info("Evolution connect response for pairing (tentativa %d): %s", attempt + 1, data)
+                pairing = data.get("pairingCode")
+                if pairing:
+                    return pairing
+                last_error = EvolutionError("pairingCode retornou null na resposta da API")
+        except httpx.HTTPError as exc:
+            last_error = exc
+        if attempt < max_retries - 1:
+            await asyncio.sleep(3)
+    raise EvolutionError(f"Falha ao obter código de pareamento após {max_retries} tentativas: {last_error}")
 
 
 async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, max_retries: int = 3) -> str | None:

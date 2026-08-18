@@ -168,11 +168,10 @@ async def evolution_qrcode():
 
 @router.post("/evolution/pairing-code", response_model=dict)
 async def evolution_pairing_code(data: PairingCodeIn):
-    """Gera um código de pareamento numérico para conectar sem QR code.
-    O número deve estar no formato 5511999999999."""
+    """Tenta obter código de pareamento; se a API não suportar, retorna o QR code."""
     try:
-        code = await evolution.get_pairing_code(data.number)
-        return {"ok": True, "pairingCode": code}
+        result = await evolution.get_pairing_code(data.number)
+        return {"ok": True, **result}
     except EvolutionError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 

@@ -143,8 +143,8 @@ async def _restart_instance() -> None:
         logger.warning("Falha ao reiniciar instância: %s", exc)
 
 
-async def get_pairing_code(number: str, max_retries: int = 3) -> str | None:
-    """Retorna um código de pareamento (ex: ABCD-EFGH) para conectar sem QR code.
+async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
+    """Retorna dados de conexão: pairingCode e/ou QR code (base64).
     O número deve estar no formato 5511999999999 (código do país + DDD + número).
     Reinicia a instância antes de solicitar o código para garantir um estado limpo."""
     try:
@@ -153,7 +153,7 @@ async def get_pairing_code(number: str, max_retries: int = 3) -> str | None:
         raise
     logger.info("get_pairing_code: connection state = %s", state)
     if state == "open":
-        return None
+        return {"connected": True}
 
     await _restart_instance()
     await asyncio.sleep(5)
@@ -168,9 +168,12 @@ async def get_pairing_code(number: str, max_retries: int = 3) -> str | None:
                 data = resp.json()
                 logger.info("Evolution connect response for pairing (tentativa %d): %s", attempt + 1, data)
                 pairing = data.get("pairingCode")
+                base64_qr = data.get("base64")
                 if pairing:
-                    return pairing
-                last_error = EvolutionError("pairingCode retornou null na resposta da API")
+                    return {"pairingCode": pairing}
+                if base64_qr:
+                    return {"pairingCode": None, "qrcode": base64_qr}
+                last_error = EvolutionError("Resposta da API não contém pairingCode nem qrcode")
         except httpx.HTTPError as exc:
             last_error = exc
         if attempt < max_retries - 1:

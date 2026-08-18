@@ -148,12 +148,7 @@ async def get_pairing_code(number: str) -> str | None:
             resp.raise_for_status()
             data = resp.json()
             logger.info("Evolution connect response for pairing: %s", data)
-            pairing = (
-                data.get("pairingCode")
-                or data.get("code")
-                or (data.get("qrcode") or {}).get("pairingCode")
-                or data.get("instance", {}).get("pairingCode")
-            )
+            pairing = data.get("pairingCode") or (data.get("qrcode") or {}).get("pairingCode")
             return pairing
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao obter código de pareamento: {exc}") from exc

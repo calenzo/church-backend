@@ -144,7 +144,7 @@ async def get_pairing_code(number: str) -> str | None:
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, params={"number": number}, headers=_headers())
+            resp = await client.post(url, json={"number": number}, headers=_headers())
             resp.raise_for_status()
             data = resp.json()
             logger.info("Evolution connect response for pairing: %s", data)

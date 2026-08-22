@@ -113,22 +113,51 @@ async def list_groups(max_retries: int = 3, force_refresh: bool = False) -> list
 
 async def get_qrcode() -> str | None:
     """Retorna o QR code (base64) para parear o WhatsApp, ou None se já conectado."""
-    try:
-        state = await ping()
-    except EvolutionError:
-        raise
+    state = await ping()
     if state == "open":
         return None
+    data = await _connect_with_autocreate()
+    qr = data.get("qrcode") or data
+    return qr.get("base64")
+
+
+async def _create_instance() -> None:
+    """Recria a instância na Evolution API (após reset ou apagamento)."""
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/create/{settings.evolution_instance}"
+    payload = {
+        "instanceName": settings.evolution_instance,
+        "qrcode": True,
+        "integration": "WHATSAPP-BAILEYS",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload, headers=_headers())
+        if resp.status_code in (200, 201):
+            logger.info("Instância criada novamente na Evolution API")
+        else:
+            logger.warning("Falha ao criar instância (HTTP %d): %s", resp.status_code, resp.text[:300])
+
+
+async def _connect_raw(number: str | None = None) -> dict:
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
+    params = {"number": number} if number else None
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=_headers())
+            resp = await client.get(url, params=params, headers=_headers())
             resp.raise_for_status()
-            data = resp.json()
-            qr = data.get("qrcode") or data
-            return qr.get("base64")
+            return resp.json()
     except httpx.HTTPError as exc:
-        raise EvolutionError(f"Falha ao obter QR code da Evolution API: {exc}") from exc
+        raise EvolutionError(f"Falha ao conectar instância na Evolution API: {exc}") from exc
+
+
+async def _connect_with_autocreate(number: str | None = None) -> dict:
+    """Conecta a instância; se ela não existir mais (sessão resetada), recria e tenta de novo."""
+    try:
+        return await _connect_raw(number)
+    except EvolutionError as exc:
+        logger.warning("Connect falhou (%s); recriando instância antes de tentar novamente", exc)
+        await _create_instance()
+        await asyncio.sleep(2)
+        return await _connect_raw(number)
 
 
 async def _restart_instance() -> None:
@@ -172,10 +201,30 @@ async def logout_instance() -> dict:
             logger.warning("Logout retornou erro (%s) mas a instância não está mais conectada", exc)
             _invalidate_groups_cache()
             return {"disconnected": True}
-        raise EvolutionError(f"Falha ao desconectar a instância na Evolution API: {exc}") from exc
+        # Sessão corrompida (ex.: arquivos perdidos em disco efêmero): apaga a
+        # instância como último recurso para permitir reconexão limpa.
+        logger.warning("Logout falhou (%s) e instância segue '%s'; apagando instância para resetar", exc, state)
+        await delete_instance()
+        return {"disconnected": True, "instance_deleted": True}
     _invalidate_groups_cache()
     logger.info("Logout da instância realizado com sucesso")
     return {"disconnected": True}
+
+
+async def delete_instance() -> None:
+    """Apaga a instância na Evolution API (registro e credenciais salvas).
+    Usado para limpar sessões corrompidas que nem o logout aceita."""
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/delete/{settings.evolution_instance}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.delete(url, headers=_headers())
+            if resp.status_code == 404:
+                return
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise EvolutionError(f"Falha ao apagar instância na Evolution API: {exc}") from exc
+    logger.info("Instância apagada na Evolution API")
+    _invalidate_groups_cache()
 
 
 def _invalidate_groups_cache() -> None:
@@ -183,14 +232,11 @@ def _invalidate_groups_cache() -> None:
     _groups_cache["ts"] = 0.0
 
 
-async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
+async def get_pairing_code(number: str) -> dict:
     """Retorna dados de conexão: pairingCode e/ou QR code (base64).
     O número deve estar no formato 5511999999999 (código do país + DDD + número).
     Faz logout da instância antes para limpar credenciais e permitir pairing code."""
-    try:
-        state = await ping()
-    except EvolutionError:
-        raise
+    state = await ping()
     logger.info("get_pairing_code: connection state = %s", state)
     if state == "open":
         return {"connected": True}
@@ -201,27 +247,14 @@ async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
         logger.warning("Falha ao limpar credenciais antes do pairing code: %s", exc)
     await asyncio.sleep(3)
 
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
-    last_error: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, params={"number": number}, headers=_headers())
-                resp.raise_for_status()
-                data = resp.json()
-                logger.info("Evolution connect response for pairing (tentativa %d): %s", attempt + 1, data)
-                pairing = data.get("pairingCode")
-                base64_qr = data.get("base64")
-                if pairing:
-                    return {"pairingCode": pairing}
-                if base64_qr:
-                    return {"pairingCode": None, "qrcode": base64_qr}
-                last_error = EvolutionError("Resposta da API não contém pairingCode nem qrcode")
-        except httpx.HTTPError as exc:
-            last_error = exc
-        if attempt < max_retries - 1:
-            await asyncio.sleep(3)
-    raise EvolutionError(f"Falha ao obter código de pareamento após {max_retries} tentativas: {last_error}")
+    data = await _connect_with_autocreate(number)
+    pairing = data.get("pairingCode")
+    base64_qr = data.get("base64")
+    if pairing:
+        return {"pairingCode": pairing}
+    if base64_qr:
+        return {"pairingCode": None, "qrcode": base64_qr}
+    raise EvolutionError("Resposta da API não contém pairingCode nem qrcode")
 
 
 async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, max_retries: int = 3) -> str | None:

@@ -136,12 +136,15 @@ async def create_instance(instance: str) -> None:
         "qrcode": True,
         "integration": "WHATSAPP-BAILEYS",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, json=payload, headers=_headers())
-        if resp.status_code in (200, 201):
-            logger.info("Instância '%s' criada na Evolution API", instance)
-        else:
-            logger.warning("Falha ao criar instância (HTTP %d): %s", resp.status_code, resp.text[:300])
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json=payload, headers=_headers())
+            if resp.status_code in (200, 201):
+                logger.info("Instância '%s' criada na Evolution API", instance)
+            else:
+                logger.warning("Falha ao criar instância (HTTP %d): %s", resp.status_code, resp.text[:300])
+    except httpx.HTTPError as exc:
+        raise EvolutionError(f"Falha ao comunicar com a Evolution API: {exc}") from exc
 
 
 async def _connect_raw(number: str | None = None, instance: str | None = None) -> dict:

@@ -89,6 +89,12 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=4)
 
 
+class UserCreateIn(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    name: str = Field(default="", max_length=160)
+    password: str = Field(min_length=6)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -97,6 +103,7 @@ class UserOut(BaseModel):
     name: str
     role: str
     church_id: int | None = None
+    active: bool = True
 
 
 class TokenOut(BaseModel):

@@ -14,7 +14,7 @@ from auth import (
 )
 from config import settings
 from database import get_db
-from models import Church, Department, LLMConfig, MessageLog, User, WhatsAppNumber
+from models import AuthSession, Church, Department, LLMConfig, MessageLog, User, WhatsAppNumber
 from routers.webhook import get_or_create_config
 from schemas import (
     ChurchCreate,
@@ -34,6 +34,7 @@ from schemas import (
     ServiceStatus,
     TestSendIn,
     TokenOut,
+    UserCreateIn,
     UserOut,
 )
 from services import evolution, llm
@@ -53,6 +54,8 @@ def _resolve_church(db: Session, user: User, church_id: int | None) -> Church:
     if user.role != "super_admin":
         if not user.church_id:
             raise HTTPException(status_code=403, detail="Usuário sem igreja vinculada")
+        if church_id and church_id != user.church_id:
+            raise HTTPException(status_code=403, detail="Sem acesso a esta igreja")
         church = db.get(Church, user.church_id)
         if not church:
             raise HTTPException(status_code=404, detail="Igreja não encontrada")
@@ -179,6 +182,43 @@ def update_church(
     return church
 
 
+# ----------------------------- Usuários das igrejas (super admin) -----------------------------
+
+
+@router.get("/churches/{church_id}/users", response_model=list[UserOut])
+def list_church_users(
+    church_id: int,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    _resolve_church(db, user, church_id)
+    return db.query(User).filter(User.church_id == church_id).order_by(User.email).all()
+
+
+@router.post("/churches/{church_id}/users", response_model=UserOut, status_code=201)
+def create_church_user(
+    church_id: int,
+    data: UserCreateIn,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    church = _resolve_church(db, user, church_id)
+    email = data.email.strip().lower()
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="Já existe um usuário com este e-mail")
+    new_user = User(
+        email=email,
+        name=data.name.strip(),
+        password_hash=hash_password(data.password),
+        role="admin",
+        church_id=church.id,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
 @router.delete("/churches/{church_id}", status_code=204)
 async def delete_church(
     church_id: int,
@@ -204,6 +244,24 @@ async def delete_church(
     db.commit()
 
 
+@router.delete("/users/{user_id}", status_code=204)
+def delete_user(
+    user_id: int,
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if target.role == "super_admin":
+        raise HTTPException(status_code=400, detail="Não é possível excluir um super admin")
+    if target.id == user.id:
+        raise HTTPException(status_code=400, detail="Não é possível excluir o próprio usuário")
+    db.query(AuthSession).filter(AuthSession.user_id == target.id).delete()
+    db.delete(target)
+    db.commit()
+
+
 # ----------------------------- Números WhatsApp -----------------------------
 
 
@@ -221,14 +279,17 @@ def list_numbers(
 async def create_number(
     church_id: int,
     data: NumberCreate,
-    user: User = Depends(require_super_admin),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     church = _resolve_church(db, user, church_id)
     instance = (data.instance_name or "").strip() or f"{church.slug}-{secrets.token_hex(3)}"
     if db.query(WhatsAppNumber).filter(WhatsAppNumber.instance_name == instance).first():
         raise HTTPException(status_code=400, detail="Já existe um número com esse nome de instância")
-    await evolution.create_instance(instance)
+    try:
+        await evolution.create_instance(instance)
+    except EvolutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
     number = WhatsAppNumber(church_id=church.id, instance_name=instance, label=data.label.strip())
     db.add(number)
     db.commit()

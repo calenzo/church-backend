@@ -146,6 +146,14 @@ async def _restart_instance() -> None:
 async def logout_instance() -> dict:
     """Faz logout da instância para desconectar o WhatsApp e limpar credenciais salvas.
     Necessário para que o pairing code funcione (a instância não pode estar 'registered')."""
+    try:
+        state = await ping()
+    except EvolutionError:
+        state = None
+
+    if state is not None and state != "open":
+        return {"disconnected": False, "already_disconnected": True}
+
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/logout/{settings.evolution_instance}"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -154,11 +162,25 @@ async def logout_instance() -> dict:
                 return {"disconnected": False, "already_disconnected": True}
             resp.raise_for_status()
     except httpx.HTTPError as exc:
+        # Algumas versões da Evolution retornam 404/500 ao deslogar instância
+        # já desconectada ou durante cold-start. Confere o estado real antes de falhar.
+        try:
+            state = await ping()
+        except EvolutionError:
+            state = None
+        if state != "open":
+            logger.warning("Logout retornou erro (%s) mas a instância não está mais conectada", exc)
+            _invalidate_groups_cache()
+            return {"disconnected": True}
         raise EvolutionError(f"Falha ao desconectar a instância na Evolution API: {exc}") from exc
-    _groups_cache["data"] = None
-    _groups_cache["ts"] = 0.0
+    _invalidate_groups_cache()
     logger.info("Logout da instância realizado com sucesso")
     return {"disconnected": True}
+
+
+def _invalidate_groups_cache() -> None:
+    _groups_cache["data"] = None
+    _groups_cache["ts"] = 0.0
 
 
 async def get_pairing_code(number: str, max_retries: int = 3) -> dict:

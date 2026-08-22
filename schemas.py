@@ -82,3 +82,67 @@ class TestSendIn(BaseModel):
 
 class PairingCodeIn(BaseModel):
     number: str = Field(min_length=1, description="Número no formato 5511999999999")
+
+
+class LoginIn(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=4)
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    name: str
+    role: str
+    church_id: int | None = None
+
+
+class TokenOut(BaseModel):
+    token: str
+    user: UserOut
+
+
+class ChurchCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
+class ChurchUpdate(BaseModel):
+    name: str | None = None
+    active: bool | None = None
+
+
+class ChurchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    slug: str
+    active: bool
+    created_at: datetime | None = None
+
+
+class NumberCreate(BaseModel):
+    label: str = ""
+    instance_name: str | None = Field(
+        default=None, max_length=120,
+        description="Opcional. Gerado automaticamente se vazio.",
+    )
+
+
+class NumberUpdate(BaseModel):
+    label: str | None = None
+    active: bool | None = None
+
+
+class NumberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    church_id: int
+    instance_name: str
+    label: str
+    phone: str
+    active: bool
+    created_at: datetime | None = None

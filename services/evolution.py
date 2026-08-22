@@ -8,8 +8,8 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Cache em memória para grupos (evita bater na Evolution API toda página)
-_groups_cache: dict = {"data": None, "ts": 0.0}
+# Cache em memória para grupos, por instância (evita bater na Evolution API toda página)
+_groups_cache: dict[str, dict] = {}
 GROUPS_CACHE_TTL = 300  # 5 minutos
 
 
@@ -24,10 +24,11 @@ def _headers() -> dict:
     return headers
 
 
-async def send_text(number: str, text: str, max_retries: int = 3) -> dict:
+async def send_text(number: str, text: str, instance: str | None = None, max_retries: int = 3) -> dict:
     """Envia mensagem de texto via Evolution API para um número ou grupo (JID).
     Inclui retry com backoff para lidar com cold-start da Evolution API."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/message/sendText/{settings.evolution_instance}"
+    inst = instance or settings.evolution_instance
+    url = f"{settings.evolution_base_url.rstrip('/')}/message/sendText/{inst}"
     payload = {"number": number, "text": text}
     last_error: Exception | None = None
     for attempt in range(max_retries):
@@ -44,15 +45,20 @@ async def send_text(number: str, text: str, max_retries: int = 3) -> dict:
     raise EvolutionError(f"Falha ao enviar mensagem após {max_retries} tentativas: {last_error}")
 
 
-async def list_groups(max_retries: int = 3, force_refresh: bool = False) -> list[dict]:
+async def list_groups(
+    instance: str | None = None,
+    max_retries: int = 3,
+    force_refresh: bool = False,
+) -> list[dict]:
     """Retorna a lista de grupos do WhatsApp da instância: [{"id", "subject"}].
     Usa cache em memória com TTL de 5 minutos. force_refresh=True ignora o cache."""
+    inst = instance or settings.evolution_instance
+    cache = _groups_cache.setdefault(inst, {"data": None, "ts": 0.0})
     now = time.monotonic()
-    if not force_refresh and _groups_cache["data"] is not None and (now - _groups_cache["ts"]) < GROUPS_CACHE_TTL:
-        return _groups_cache["data"]
+    if not force_refresh and cache["data"] is not None and (now - cache["ts"]) < GROUPS_CACHE_TTL:
+        return cache["data"]
 
     base = settings.evolution_base_url.rstrip("/")
-    inst = settings.evolution_instance
     url = f"{base}/group/fetchAllGroups/{inst}"
 
     last_error: Exception | None = None
@@ -102,8 +108,8 @@ async def list_groups(max_retries: int = 3, force_refresh: bool = False) -> list
                 continue
             result.append({"id": g.get("id"), "subject": g.get("subject") or g.get("id")})
 
-        _groups_cache["data"] = result
-        _groups_cache["ts"] = time.monotonic()
+        cache["data"] = result
+        cache["ts"] = time.monotonic()
         return result
 
     raise EvolutionError(
@@ -111,34 +117,36 @@ async def list_groups(max_retries: int = 3, force_refresh: bool = False) -> list
     )
 
 
-async def get_qrcode() -> str | None:
+async def get_qrcode(instance: str | None = None) -> str | None:
     """Retorna o QR code (base64) para parear o WhatsApp, ou None se já conectado."""
-    state = await ping()
+    inst = instance or settings.evolution_instance
+    state = await ping(inst)
     if state == "open":
         return None
-    data = await _connect_with_autocreate()
+    data = await _connect_with_autocreate(instance=inst)
     qr = data.get("qrcode") or data
     return qr.get("base64")
 
 
-async def _create_instance() -> None:
-    """Recria a instância na Evolution API (após reset ou apagamento)."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/create/{settings.evolution_instance}"
+async def create_instance(instance: str) -> None:
+    """Cria a instância na Evolution API (novo número ou recriação após reset)."""
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/create/{instance}"
     payload = {
-        "instanceName": settings.evolution_instance,
+        "instanceName": instance,
         "qrcode": True,
         "integration": "WHATSAPP-BAILEYS",
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(url, json=payload, headers=_headers())
         if resp.status_code in (200, 201):
-            logger.info("Instância criada novamente na Evolution API")
+            logger.info("Instância '%s' criada na Evolution API", instance)
         else:
             logger.warning("Falha ao criar instância (HTTP %d): %s", resp.status_code, resp.text[:300])
 
 
-async def _connect_raw(number: str | None = None) -> dict:
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"
+async def _connect_raw(number: str | None = None, instance: str | None = None) -> dict:
+    inst = instance or settings.evolution_instance
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{inst}"
     params = {"number": number} if number else None
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -149,41 +157,30 @@ async def _connect_raw(number: str | None = None) -> dict:
         raise EvolutionError(f"Falha ao conectar instância na Evolution API: {exc}") from exc
 
 
-async def _connect_with_autocreate(number: str | None = None) -> dict:
-    """Conecta a instância; se ela não existir mais (sessão resetada), recria e tenta de novo."""
+async def _connect_with_autocreate(number: str | None = None, instance: str | None = None) -> dict:
+    """Conecta a instância; se ela não existir mais (sessão resetada), cria e tenta de novo."""
     try:
-        return await _connect_raw(number)
+        return await _connect_raw(number, instance)
     except EvolutionError as exc:
-        logger.warning("Connect falhou (%s); recriando instância antes de tentar novamente", exc)
-        await _create_instance()
+        logger.warning("Connect falhou (%s); criando instância antes de tentar novamente", exc)
+        await create_instance(instance or settings.evolution_instance)
         await asyncio.sleep(2)
-        return await _connect_raw(number)
+        return await _connect_raw(number, instance)
 
 
-async def _restart_instance() -> None:
-    """Reinicia a instância da Evolution API (necessário para gerar pairing code)."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/restart/{settings.evolution_instance}"
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.put(url, headers=_headers())
-            resp.raise_for_status()
-            logger.info("Instância reiniciada com sucesso")
-    except httpx.HTTPError as exc:
-        logger.warning("Falha ao reiniciar instância: %s", exc)
-
-
-async def logout_instance() -> dict:
+async def logout_instance(instance: str | None = None) -> dict:
     """Faz logout da instância para desconectar o WhatsApp e limpar credenciais salvas.
     Necessário para que o pairing code funcione (a instância não pode estar 'registered')."""
+    inst = instance or settings.evolution_instance
     try:
-        state = await ping()
+        state = await ping(inst)
     except EvolutionError:
         state = None
 
     if state is not None and state != "open":
         return {"disconnected": False, "already_disconnected": True}
 
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/logout/{settings.evolution_instance}"
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/logout/{inst}"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.delete(url, headers=_headers())
@@ -194,27 +191,28 @@ async def logout_instance() -> dict:
         # Algumas versões da Evolution retornam 404/500 ao deslogar instância
         # já desconectada ou durante cold-start. Confere o estado real antes de falhar.
         try:
-            state = await ping()
+            state = await ping(inst)
         except EvolutionError:
             state = None
         if state != "open":
             logger.warning("Logout retornou erro (%s) mas a instância não está mais conectada", exc)
-            _invalidate_groups_cache()
+            invalidate_groups_cache(inst)
             return {"disconnected": True}
         # Sessão corrompida (ex.: arquivos perdidos em disco efêmero): apaga a
         # instância como último recurso para permitir reconexão limpa.
         logger.warning("Logout falhou (%s) e instância segue '%s'; apagando instância para resetar", exc, state)
-        await delete_instance()
+        await delete_instance(inst)
         return {"disconnected": True, "instance_deleted": True}
-    _invalidate_groups_cache()
+    invalidate_groups_cache(inst)
     logger.info("Logout da instância realizado com sucesso")
     return {"disconnected": True}
 
 
-async def delete_instance() -> None:
+async def delete_instance(instance: str | None = None) -> None:
     """Apaga a instância na Evolution API (registro e credenciais salvas).
     Usado para limpar sessões corrompidas que nem o logout aceita."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/delete/{settings.evolution_instance}"
+    inst = instance or settings.evolution_instance
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/delete/{inst}"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.delete(url, headers=_headers())
@@ -224,30 +222,33 @@ async def delete_instance() -> None:
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao apagar instância na Evolution API: {exc}") from exc
     logger.info("Instância apagada na Evolution API")
-    _invalidate_groups_cache()
+    invalidate_groups_cache(inst)
 
 
-def _invalidate_groups_cache() -> None:
-    _groups_cache["data"] = None
-    _groups_cache["ts"] = 0.0
+def invalidate_groups_cache(instance: str | None = None) -> None:
+    if instance:
+        _groups_cache.pop(instance, None)
+    else:
+        _groups_cache.clear()
 
 
-async def get_pairing_code(number: str) -> dict:
+async def get_pairing_code(number: str, instance: str | None = None) -> dict:
     """Retorna dados de conexão: pairingCode e/ou QR code (base64).
     O número deve estar no formato 5511999999999 (código do país + DDD + número).
     Faz logout da instância antes para limpar credenciais e permitir pairing code."""
-    state = await ping()
+    inst = instance or settings.evolution_instance
+    state = await ping(inst)
     logger.info("get_pairing_code: connection state = %s", state)
     if state == "open":
         return {"connected": True}
 
     try:
-        await logout_instance()
+        await logout_instance(inst)
     except EvolutionError as exc:
         logger.warning("Falha ao limpar credenciais antes do pairing code: %s", exc)
     await asyncio.sleep(3)
 
-    data = await _connect_with_autocreate(number)
+    data = await _connect_with_autocreate(number, inst)
     pairing = data.get("pairingCode")
     base64_qr = data.get("base64")
     if pairing:
@@ -257,10 +258,11 @@ async def get_pairing_code(number: str) -> dict:
     raise EvolutionError("Resposta da API não contém pairingCode nem qrcode")
 
 
-async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, max_retries: int = 3) -> str | None:
+async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, instance: str | None = None, max_retries: int = 3) -> str | None:
     """Baixa a mídia de uma mensagem recebida e retorna o base64 (sem prefixo data URI).
     Inclui retry com backoff para lidar com cold-start da Evolution API."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/chat/getBase64FromMediaMessage/{settings.evolution_instance}"
+    inst = instance or settings.evolution_instance
+    url = f"{settings.evolution_base_url.rstrip('/')}/chat/getBase64FromMediaMessage/{inst}"
     payload = {
         "message": {
             "key": {
@@ -294,9 +296,10 @@ async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool 
     raise EvolutionError(f"Falha ao baixar mídia após {max_retries} tentativas: {last_error}")
 
 
-async def ping(max_retries: int = 2) -> str:
+async def ping(instance: str | None = None, max_retries: int = 2) -> str:
     """Verifica se a instância da Evolution API está conectada."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connectionState/{settings.evolution_instance}"
+    inst = instance or settings.evolution_instance
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connectionState/{inst}"
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:

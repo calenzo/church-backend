@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal, get_db
-from models import Department, LLMConfig, MessageLog
+from models import Church, Department, LLMConfig, MessageLog, WhatsAppNumber
 from services import evolution, llm
 
 logger = logging.getLogger(__name__)
@@ -30,15 +30,15 @@ def _dedup(message_id: str, ttl: int = 20) -> bool:
     return False
 
 
-def get_or_create_config(db: Session) -> LLMConfig:
-    config = db.get(LLMConfig, 1)
+def get_or_create_config(db: Session, church_id: int | None = None) -> LLMConfig:
+    config = db.query(LLMConfig).filter(LLMConfig.church_id == church_id).first()
     if config is None:
         config = LLMConfig(
-            id=1,
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             api_key=settings.llm_api_key,
             temperature=settings.llm_temperature,
+            church_id=church_id,
         )
         db.add(config)
         db.commit()
@@ -88,11 +88,12 @@ def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
     log.steps = json.dumps(steps, ensure_ascii=False)
 
 
-def _load_history(db: Session, from_number: str, exclude_id: int, limit: int = 8) -> list[dict]:
+def _load_history(db: Session, from_number: str, church_id: int | None, exclude_id: int, limit: int = 8) -> list[dict]:
     """Carrega as últimas mensagens trocadas com este contato para dar contexto à LLM."""
     rows = (
         db.query(MessageLog)
         .filter(
+            MessageLog.church_id == church_id,
             MessageLog.from_number == from_number,
             MessageLog.id != exclude_id,
             MessageLog.text != "",
@@ -110,21 +111,23 @@ def _load_history(db: Session, from_number: str, exclude_id: int, limit: int = 8
     return history
 
 
-async def _process_message(log_id: int):
+async def _process_message(log_id: int, instance_name: str):
     """Processa a mensagem em segundo plano, atualizando o log (steps) a cada etapa."""
     db = SessionLocal()
     try:
         log = db.get(MessageLog, log_id)
         if log is None:
             return
-        config = get_or_create_config(db)
+        config = get_or_create_config(db, log.church_id)
         departments = [
             {
                 "name": d.name,
                 "description": d.description,
                 "group_jid": d.group_jid,
             }
-            for d in db.query(Department).filter(Department.active == True).all()
+            for d in db.query(Department)
+            .filter(Department.active == True, Department.church_id == log.church_id)  # noqa: E712
+            .all()
         ]
         text = log.text or ""
         from_number = log.from_number
@@ -134,7 +137,11 @@ async def _process_message(log_id: int):
             if media_key:
                 _add_step(log, "baixando mídia (áudio)")
                 db.commit()
-                audio_b64 = await evolution.get_media_base64(log.media_message_id or media_key)
+                audio_b64 = await evolution.get_media_base64(
+                    log.media_message_id or media_key,
+                    remote_jid=log.to_jid,
+                    instance=instance_name,
+                )
                 if not audio_b64:
                     raise llm.LlmError("Mídia não encontrada para transcrever")
                 _add_step(log, "transcrevendo áudio")
@@ -146,7 +153,7 @@ async def _process_message(log_id: int):
 
             _add_step(log, "classificando com a LLM")
             db.commit()
-            history = _load_history(db, from_number, exclude_id=log.id)
+            history = _load_history(db, from_number, log.church_id, exclude_id=log.id)
             result = await llm.classify_and_reply(text, departments, config, history=history)
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
@@ -183,7 +190,7 @@ async def _process_message(log_id: int):
                 f"De: {from_number}\n\n{text}"
             )
             try:
-                await evolution.send_text(matched["group_jid"], group_text)
+                await evolution.send_text(matched["group_jid"], group_text, instance=instance_name)
                 _add_step(log, "encaminhado para o grupo", detail=matched["group_jid"])
             except evolution.EvolutionError as exc:
                 logger.error("Falha ao encaminhar para o grupo %s: %s", matched["group_jid"], exc)
@@ -192,10 +199,12 @@ async def _process_message(log_id: int):
                 log.status = "routed_with_error"
                 _add_step(log, "falha ao encaminhar ao grupo", status="error", detail=str(exc))
 
-        # 2) Envia a resposta da LLM de volta para o membro
+        # 2) Envia a resposta da LLM de volta para o membro (no mesmo JID da conversa,
+        #    preservando @lid/@s.whatsapp.net conforme recebido)
         if reply:
+            reply_jid = log.to_jid or f"{from_number}@s.whatsapp.net"
             try:
-                await evolution.send_text(f"{from_number}@s.whatsapp.net", reply)
+                await evolution.send_text(reply_jid, reply, instance=instance_name)
                 _add_step(log, "resposta enviada ao membro")
             except evolution.EvolutionError as exc:
                 logger.error("Falha ao responder %s: %s", from_number, exc)
@@ -226,12 +235,26 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     if event not in ("messages.upsert", None):
         return {"ok": True, "skipped": event}
 
+    # Roteia para a igreja dona da instância que recebeu a mensagem
+    instance_name = (
+        payload.get("instance")
+        or data.get("instanceName")
+        or payload.get("data", {}).get("instance")
+        or settings.evolution_instance
+    )
+    number_row = db.query(WhatsAppNumber).filter(WhatsAppNumber.instance_name == instance_name).first()
+    if number_row:
+        church_id = number_row.church_id
+    else:
+        fallback = db.query(Church).order_by(Church.id).first()
+        church_id = fallback.id if fallback else None
+
     key = data.get("key") or {}
     remote_jid = key.get("remoteJid") or data.get("remoteJid") or ""
     from_me = bool(key.get("fromMe") or data.get("fromMe"))
 
-    # Ignora mensagens enviadas por nós e mensagens de grupos
-    if from_me or not remote_jid.endswith("@s.whatsapp.net"):
+    # Ignora mensagens enviadas por nós, grupos e canais (aceita JIDs @s.whatsapp.net e @lid)
+    if from_me or remote_jid.endswith("@g.us") or remote_jid.endswith("@broadcast"):
         return {"ok": True, "skipped": "not_private_or_from_me"}
 
     message_id = key.get("id") or ""
@@ -253,8 +276,9 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     log = MessageLog(
         direction="in",
+        church_id=church_id,
         from_number=from_number,
-        to_jid=settings.evolution_instance,
+        to_jid=remote_jid,
         text=text,
         status="received",
         media_key=media_key or None,
@@ -270,7 +294,7 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     # Processa em segundo plano para responder 200 imediatamente
     # (a Evolution espera resposta em até 60s; áudio/transcrição podem demorar mais).
-    task = asyncio.create_task(_process_message(log.id))
+    task = asyncio.create_task(_process_message(log.id, instance_name))
     task.add_done_callback(lambda t: logger.error("Background task failed: %s", t.exception()) if t.exception() else None)
 
     return {"ok": True, "processing": True}

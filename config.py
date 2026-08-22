@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.3
     llm_timeout: float = 120.0
 
+    # Super admin criado automaticamente no primeiro boot (troque a senha!)
+    admin_email: str = "admin@igreja.local"
+    admin_password: str = "mudar123"
+    admin_name: str = "Super Admin"
+
     cors_origins: str = "*"
 
 

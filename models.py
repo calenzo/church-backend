@@ -6,12 +6,70 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
 
 
+class Church(Base):
+    """Igreja (tenant). Cada igreja tem seus departamentos, números e configuração."""
+
+    __tablename__ = "churches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    slug: Mapped[str] = mapped_column(String(160), unique=True)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    departments: Mapped[list["Department"]] = relationship(back_populates="church")
+    numbers: Mapped[list["WhatsAppNumber"]] = relationship(back_populates="church")
+
+
+class User(Base):
+    """Usuário do painel. role: 'super_admin' (plataforma) ou 'admin' (da igreja)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    name: Mapped[str] = mapped_column(String(160), default="")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="admin")
+    church_id: Mapped[int | None] = mapped_column(ForeignKey("churches.id"), nullable=True)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AuthSession(Base):
+    """Sessão de login (token opaco enviado no header x-auth-token)."""
+
+    __tablename__ = "auth_sessions"
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class WhatsAppNumber(Base):
+    """Número do WhatsApp de uma igreja = uma instância na Evolution API."""
+
+    __tablename__ = "whatsapp_numbers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"))
+    instance_name: Mapped[str] = mapped_column(String(120), unique=True)
+    label: Mapped[str] = mapped_column(String(160), default="")
+    phone: Mapped[str] = mapped_column(String(40), default="")
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    church: Mapped[Church] = relationship(back_populates="numbers")
+
+
 class LLMConfig(Base):
-    """Configuração única (id=1) da LLM e do contato principal da igreja."""
+    """Configuração da LLM por igreja."""
 
     __tablename__ = "llm_config"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int | None] = mapped_column(ForeignKey("churches.id"), nullable=True, index=True)
     base_url: Mapped[str] = mapped_column(String(255), default="http://localhost:11434")
     model: Mapped[str] = mapped_column(String(120), default="llama3.1")
     api_key: Mapped[str] = mapped_column(String(255), default="")
@@ -28,6 +86,7 @@ class Department(Base):
     __tablename__ = "departments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int | None] = mapped_column(ForeignKey("churches.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
     group_name: Mapped[str] = mapped_column(String(160), default="")
@@ -35,6 +94,7 @@ class Department(Base):
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    church: Mapped[Church | None] = relationship(back_populates="departments")
     messages: Mapped[list["MessageLog"]] = relationship(back_populates="department")
 
 
@@ -44,6 +104,7 @@ class MessageLog(Base):
     __tablename__ = "message_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int | None] = mapped_column(ForeignKey("churches.id"), nullable=True, index=True)
     direction: Mapped[str] = mapped_column(String(10))  # "in" | "out"
     from_number: Mapped[str] = mapped_column(String(40), default="")
     to_jid: Mapped[str] = mapped_column(String(120), default="")

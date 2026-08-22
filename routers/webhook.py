@@ -88,6 +88,28 @@ def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
     log.steps = json.dumps(steps, ensure_ascii=False)
 
 
+def _load_history(db: Session, from_number: str, exclude_id: int, limit: int = 8) -> list[dict]:
+    """Carrega as últimas mensagens trocadas com este contato para dar contexto à LLM."""
+    rows = (
+        db.query(MessageLog)
+        .filter(
+            MessageLog.from_number == from_number,
+            MessageLog.id != exclude_id,
+            MessageLog.text != "",
+        )
+        .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    history: list[dict] = []
+    for row in reversed(rows):
+        entry = {"member": row.text}
+        if row.llm_reply:
+            entry["assistant"] = row.llm_reply
+        history.append(entry)
+    return history
+
+
 async def _process_message(log_id: int):
     """Processa a mensagem em segundo plano, atualizando o log (steps) a cada etapa."""
     db = SessionLocal()
@@ -124,7 +146,8 @@ async def _process_message(log_id: int):
 
             _add_step(log, "classificando com a LLM")
             db.commit()
-            result = await llm.classify_and_reply(text, departments, config)
+            history = _load_history(db, from_number, exclude_id=log.id)
+            result = await llm.classify_and_reply(text, departments, config, history=history)
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
             log.error = str(exc)

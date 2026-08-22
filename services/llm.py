@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import re
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -15,11 +16,42 @@ Seu trabalho é:
 3. Se a mensagem for inadequada/ofensiva ou não fizer sentido, responda genericamente
    e use o departamento "geral".
 
+Regras importantes:
+- A mensagem do usuário traz a DATA E HORA atuais no Brasil. Use-as para entender
+  palavras como "hoje", "amanhã" e "próximo". Nunca invente datas ou horários:
+  use apenas as informações dos departamentos e da conversa.
+- Existe um HISTÓRICO DA CONVERSA com o membro. Use-o para interpretar perguntas
+  curtas como "qual dia?" ou "e amanhã?", que se referem ao que foi dito antes.
+
 Responda SEMPRE apenas com JSON válido no formato:
 {"department": "<nome do departamento>", "reply": "<sua resposta>"}
 
 Se nenhum departamento corresponder, use exatamente "geral".
 """
+
+_WEEKDAYS_PT = [
+    "segunda-feira",
+    "terça-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "sábado",
+    "domingo",
+]
+
+
+def _now_brasilia() -> str:
+    """Data/hora atual no fuso de Brasília, ex.: 'sábado, 22/08/2026 às 18:22'."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    except Exception:
+        now = datetime.utcnow() - timedelta(hours=3)
+    return (
+        f"{_WEEKDAYS_PT[now.weekday()]}, "
+        f"{now.strftime('%d/%m/%Y')} às {now.strftime('%H:%M')}"
+    )
 
 
 class LlmError(Exception):
@@ -58,12 +90,39 @@ def build_departments_block(departments: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def classify_and_reply(message: str, departments: list[dict], config) -> dict:
-    """Envia a mensagem para a LLM e retorna {"department", "reply"}."""
+def build_history_block(history: list[dict] | None) -> str:
+    """Monta o bloco de histórico da conversa (mais antiga -> mais recente)."""
+    if not history:
+        return ""
+    lines = ["", "Histórico da conversa com este membro:"]
+    for entry in history:
+        member = (entry.get("member") or "").strip()
+        assistant = (entry.get("assistant") or "").strip()
+        if member:
+            lines.append(f"Membro: {member}")
+        if assistant:
+            lines.append(f"Assistente: {assistant}")
+    return "\n".join(lines)
+
+
+async def classify_and_reply(
+    message: str,
+    departments: list[dict],
+    config,
+    history: list[dict] | None = None,
+) -> dict:
+    """Envia a mensagem para a LLM e retorna {"department", "reply"}.
+    `history` é uma lista [{"member": str, "assistant": str}] das mensagens
+    anteriores deste contato, da mais antiga para a mais recente."""
     departments_block = build_departments_block(departments)
     system_prompt = config.system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
 
-    user_prompt = f"Departamentos disponíveis:\n{departments_block}\n\nMensagem do membro:\n\"{message}\""
+    user_prompt = (
+        f"Data e hora atuais no Brasil: {_now_brasilia()}.\n\n"
+        f"Departamentos disponíveis:\n{departments_block}\n"
+        f"{build_history_block(history)}\n\n"
+        f"Mensagem atual do membro:\n\"{message}\""
+    )
 
     headers = {"Content-Type": "application/json"}
     if config.api_key:

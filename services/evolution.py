@@ -118,14 +118,21 @@ async def list_groups(
 
 
 async def get_qrcode(instance: str | None = None) -> str | None:
-    """Retorna o QR code (base64) para parear o WhatsApp, ou None se já conectado."""
+    """Retorna o QR code (base64) para parear o WhatsApp, ou None se já conectado.
+    Levanta EvolutionError quando a instância existe mas o QR ainda não foi gerado."""
     inst = instance or settings.evolution_instance
     state = await ping(inst)
     if state == "open":
         return None
     data = await _connect_with_autocreate(instance=inst)
-    qr = data.get("qrcode") or data
-    return qr.get("base64")
+    qrobj = data.get("qrcode") or data
+    b64 = qrobj.get("base64") if isinstance(qrobj, dict) else None
+    if not b64:
+        # Instância recém-criada ou reconectando: o QR pode levar alguns segundos.
+        raise EvolutionError(
+            "O WhatsApp ainda esta gerando o QR code desta conexao; aguarde alguns segundos."
+        )
+    return b64
 
 
 async def create_instance(instance: str) -> None:

@@ -119,9 +119,13 @@ async def list_groups(
 
 async def get_qrcode(instance: str | None = None) -> str | None:
     """Retorna o QR code (base64) para parear o WhatsApp, ou None se já conectado.
-    Levanta EvolutionError quando a instância existe mas o QR ainda não foi gerado."""
+    Se a instância não existir mais (404), tenta recriá-la antes de buscar o QR."""
     inst = instance or settings.evolution_instance
-    state = await ping(inst)
+    try:
+        state = await ping(inst)
+    except EvolutionError:
+        # Instância ausente ou API instável: segue para conectar/recriar.
+        state = None
     if state == "open":
         return None
     data = await _connect_with_autocreate(instance=inst)
@@ -146,12 +150,14 @@ async def create_instance(instance: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(url, json=payload, headers=_headers())
-            if resp.status_code in (200, 201):
-                logger.info("Instância '%s' criada na Evolution API", instance)
-            else:
-                logger.warning("Falha ao criar instância (HTTP %d): %s", resp.status_code, resp.text[:300])
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao comunicar com a Evolution API: {exc}") from exc
+    if resp.status_code not in (200, 201):
+        logger.warning("Falha ao criar instância (HTTP %d): %s", resp.status_code, resp.text[:300])
+        raise EvolutionError(
+            f"A Evolution API recusou a criacao da instancia (HTTP {resp.status_code})."
+        )
+    logger.info("Instância '%s' criada na Evolution API", instance)
 
 
 async def _connect_raw(number: str | None = None, instance: str | None = None) -> dict:

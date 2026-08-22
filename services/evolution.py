@@ -143,17 +143,22 @@ async def _restart_instance() -> None:
         logger.warning("Falha ao reiniciar instância: %s", exc)
 
 
-async def _logout_instance() -> None:
-    """Faz logout da instância para limpar credenciais salvas.
+async def logout_instance() -> dict:
+    """Faz logout da instância para desconectar o WhatsApp e limpar credenciais salvas.
     Necessário para que o pairing code funcione (a instância não pode estar 'registered')."""
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/logout/{settings.evolution_instance}"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.delete(url, headers=_headers())
+            if resp.status_code == 404:
+                return {"disconnected": False, "already_disconnected": True}
             resp.raise_for_status()
-            logger.info("Logout da instância realizado com sucesso")
     except httpx.HTTPError as exc:
-        logger.warning("Falha ao fazer logout da instância: %s", exc)
+        raise EvolutionError(f"Falha ao desconectar a instância na Evolution API: {exc}") from exc
+    _groups_cache["data"] = None
+    _groups_cache["ts"] = 0.0
+    logger.info("Logout da instância realizado com sucesso")
+    return {"disconnected": True}
 
 
 async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
@@ -168,7 +173,10 @@ async def get_pairing_code(number: str, max_retries: int = 3) -> dict:
     if state == "open":
         return {"connected": True}
 
-    await _logout_instance()
+    try:
+        await logout_instance()
+    except EvolutionError as exc:
+        logger.warning("Falha ao limpar credenciais antes do pairing code: %s", exc)
     await asyncio.sleep(3)
 
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{settings.evolution_instance}"

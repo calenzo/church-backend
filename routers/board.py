@@ -176,6 +176,16 @@ async def evolution_pairing_code(data: PairingCodeIn):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@router.post("/evolution/disconnect", response_model=dict)
+async def evolution_disconnect():
+    """Desconecta a sessão do WhatsApp da instância (logout)."""
+    try:
+        result = await evolution.logout_instance()
+        return {"ok": True, **result}
+    except EvolutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @router.get("/qr")
 async def qr_page():
     """Página HTML com o QR code para escanear com o celular."""

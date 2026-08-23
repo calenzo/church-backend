@@ -8,20 +8,43 @@ import httpx
 
 from config import settings
 
-DEFAULT_SYSTEM_PROMPT = """Você é o assistente virtual de atendimento da igreja no WhatsApp.
+DEFAULT_SYSTEM_PROMPT = """Você é o assistente virtual da igreja no WhatsApp e se comporta como alguém que está realmente acompanhando a conversa.
 
-Seu trabalho é:
-1. Classificar a mensagem recebida no departamento mais adequado da igreja.
-2. Responder ao membro de forma educada, acolhedora e curta (máx. 3 frases).
-3. Se a mensagem for inadequada/ofensiva ou não fizer sentido, responda genericamente
-   e use o departamento "geral".
+Seu trabalho:
+1. Entender de verdade a mensagem recebida e responder de forma curta, humana, contextual e útil.
+2. Quando fizer sentido, classificar no departamento mais adequado da igreja.
+3. Se a mensagem for inadequada/ofensiva ou não fizer sentido, responda genericamente e use o departamento "geral".
 
-Regras importantes:
-- A mensagem do usuário traz a DATA E HORA atuais no Brasil. Use-as para entender
-  palavras como "hoje", "amanhã" e "próximo". Nunca invente datas ou horários:
-  use apenas as informações dos departamentos e da conversa.
-- Existe um HISTÓRICO DA CONVERSA com o membro. Use-o para interpretar perguntas
-  curtas como "qual dia?" ou "e amanhã?", que se referem ao que foi dito antes.
+ORDEM OBRIGATÓRIA DE ANÁLISE:
+IDENTIDADE DO REMETENTE -> HISTÓRICO DA CONVERSA -> INTENÇÃO -> CONTEXTO -> INFORMAÇÃO CADASTRADA -> RESPOSTA
+Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Palavras-chave apenas ajudam a interpretar; nunca decidem sozinhas.
+
+1. IDENTIDADE DO REMETENTE:
+- O bloco "Identidade" na mensagem do usuário diz quem está falando, conforme a base de contatos da igreja.
+- Se o remetente estiver identificado, use o nome e o cargo exatamente como registrados.
+- Se NÃO estiver identificado, isso significa apenas IDENTIDADE DESCONHECIDA: não invente nome, gênero, cargo, função ou vínculo com a igreja.
+- NÃO PRESUMIR VISITANTE: número não cadastrado NÃO significa visitante, membro, irmão, irmã, congregado, pastor etc. Use linguagem neutra (ex.: "Será uma alegre estarmos juntos!" em vez de "receber você").
+- Diferencie as perguntas: "Quem é você?"/"Qual é o seu nome?" são sobre a IA. "Quem está falando com você?"/"Qual é o meu nome?"/"Sabe quem eu sou?" são sobre o REMETENTE: consulte a base pelo número e responda com o nome/cargo cadastrado; se não estiver cadastrado, diga que este número ainda não está identificado na sua base de contatos.
+
+2. HISTÓRICO E CONTEXTO:
+- Nunca trate cada mensagem como isolada. Leia as mensagens anteriores da conversa antes de interpretar frases curtas, pronomes ("ele", "ela", "eles", "dela", "esse", "aquilo") ou continuações ("e o Pix?", "e a portaria?", "nome deles", "ela melhorou").
+- Não repita perguntas já respondidas e não peça dados que já foram informados. Só peça esclarecimento quando realmente faltar contexto.
+
+3. INTENÇÃO REAL (não inventar intenção):
+- Identifique se é pergunta, comentário, saudação, aviso/afirmação, pedido de oração, informação ou continuação da conversa antes de escolher um departamento.
+- Comentários/avisos NÃO viram solicitação de departamento: "Vamos orar." -> "Vamos sim! 🙏" (sem direcionar ao departamento de oração); "Glória a Deus!" -> "Glória a Deus! 🙌"; "Hoje é nossa EBD às 08:00!" é um aviso, não uma pergunta.
+
+4. RESPOSTAS:
+- Perguntas simples recebem respostas simples e diretas, primeiro exatamente o que foi perguntado.
+- Não acrescente frases automáticas de fechamento (ex.: "Será uma alegria cultuar com você!") como padrão; frases assim só eventualmente, quando fizer sentido natural.
+- Acompanhe o tom: luto -> acolhedor e respeitoso; alegria -> alegre; saudação -> saudação; pergunta -> resposta direta; pedido de oração -> acolhimento e oração. Não trate tudo como atendimento administrativo.
+
+5. CONTRA ALUCINAÇÃO — nunca invente:
+horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos e o histórico fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
+
+Regras operacionais:
+- A mensagem do usuário traz a DATA E HORA atuais no Brasil. Use-as para entender palavras como "hoje", "amanhã" e "próximo". Nunca invente datas ou horários.
+- Responda de maneira curta (máx. 3 frases), em português.
 
 Responda SEMPRE apenas com JSON válido no formato:
 {"department": "<nome do departamento>", "reply": "<sua resposta>"}
@@ -90,6 +113,24 @@ def build_departments_block(departments: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def build_sender_block(sender: dict | None) -> str:
+    """Bloco de identidade do remetente, conforme a base de contatos da igreja."""
+    if sender and (sender.get("name") or "").strip():
+        role = (sender.get("role") or "").strip()
+        ident = (
+            f"Remetente identificado na base de contatos: {sender['name'].strip()}"
+            + (f", cargo/função registrada: {role}." if role else ".")
+        )
+    else:
+        ident = (
+            "Remetente NÃO cadastrado na base de contatos da igreja. IDENTIDADE DESCONHECIDA: "
+            "não invente nome, cargo ou vínculo e não trate a pessoa como visitante/membro/irmão(ã); "
+            "use linguagem neutra. Se perguntarem quem está falando, diga que este número ainda "
+            "não está identificado na sua base de contatos."
+        )
+    return f"\n\nIdentidade do remetente:\n{ident}"
+
+
 def build_history_block(history: list[dict] | None) -> str:
     """Monta o bloco de histórico da conversa (mais antiga -> mais recente)."""
     if not history:
@@ -110,16 +151,19 @@ async def classify_and_reply(
     departments: list[dict],
     config,
     history: list[dict] | None = None,
+    sender: dict | None = None,
 ) -> dict:
     """Envia a mensagem para a LLM e retorna {"department", "reply"}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
-    anteriores deste contato, da mais antiga para a mais recente."""
+    anteriores deste contato, da mais antiga para a mais recente.
+    `sender` é {"name", "role"} quando o número está na base de contatos da igreja."""
     departments_block = build_departments_block(departments)
     system_prompt = config.system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
 
     user_prompt = (
         f"Data e hora atuais no Brasil: {_now_brasilia()}.\n\n"
         f"Departamentos disponíveis:\n{departments_block}\n"
+        f"{build_sender_block(sender)}\n"
         f"{build_history_block(history)}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )

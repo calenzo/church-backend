@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -96,6 +96,20 @@ class Department(Base):
 
     church: Mapped[Church | None] = relationship(back_populates="departments")
     messages: Mapped[list["MessageLog"]] = relationship(back_populates="department")
+
+
+class Contact(Base):
+    """Contato da igreja: número -> nome/cargo, usado pela IA para reconhecer o remetente."""
+
+    __tablename__ = "contacts"
+    __table_args__ = (UniqueConstraint("church_id", "phone", name="uq_contacts_church_phone"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    phone: Mapped[str] = mapped_column(String(20))  # apenas dígitos, ex.: 5521999069940
+    name: Mapped[str] = mapped_column(String(160))
+    role: Mapped[str] = mapped_column(String(80), default="")  # cargo/função, ex.: Pastor
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class MessageLog(Base):

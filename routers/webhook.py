@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal, get_db
-from models import Church, Department, LLMConfig, MessageLog, WhatsAppNumber
+from models import Church, Contact, Department, LLMConfig, MessageLog, WhatsAppNumber
 from services import evolution, llm
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,44 @@ def _is_audio(data: dict) -> bool:
 
 def _normalize_jid(jid: str) -> str:
     return jid.split("@")[0] if "@" in jid else jid
+
+
+def _digits(phone: str) -> str:
+    return re.sub(r"\D", "", phone or "")
+
+
+def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
+    """Melhor número real do remetente (LIDs do WhatsApp não são telefones).
+    Preferência: participantPhoneNumber/participantPn -> senderPn -> JID."""
+    candidates = [
+        key.get("participantPhoneNumber"),
+        key.get("participantPn"),
+        data.get("senderPn"),
+        key.get("remoteJid") if not is_group else None,
+        key.get("participant") if is_group else None,
+    ]
+    for cand in candidates:
+        if cand and isinstance(cand, str):
+            digits = _normalize_jid(cand)
+            if digits:
+                return digits
+    return ""
+
+
+def _lookup_contact(db: Session, church_id: int | None, phone: str) -> Contact | None:
+    """Encontra o contato cadastrado pelo número do remetente (só dígitos).
+    Tolerante ao DDI 55: cadastro '219999069940' casa com JID '55219999069940'."""
+    digits = _digits(phone)
+    if not digits or not church_id:
+        return None
+    candidates = [digits]
+    if digits.startswith("55") and len(digits) >= 12:
+        candidates.append(digits[2:])
+    return (
+        db.query(Contact)
+        .filter(Contact.church_id == church_id, Contact.phone.in_(candidates))
+        .first()
+    )
 
 
 def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
@@ -163,7 +202,11 @@ async def _process_message(log_id: int, instance_name: str):
             _add_step(log, "classificando com a LLM")
             db.commit()
             history = _load_history(db, from_number, log.church_id, exclude_id=log.id)
-            result = await llm.classify_and_reply(text, scope_departments, config, history=history)
+            contact = _lookup_contact(db, log.church_id, from_number)
+            sender = {"name": contact.name, "role": contact.role} if contact else None
+            result = await llm.classify_and_reply(
+                text, scope_departments, config, history=history, sender=sender
+            )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
             log.error = str(exc)
@@ -195,9 +238,10 @@ async def _process_message(log_id: int, instance_name: str):
         # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo
         #    configurado e a pergunta não tenha vindo do próprio grupo dele.
         if matched and matched.get("group_jid") and matched["group_jid"] != log.to_jid:
+            sender_label = f"{contact.name} ({from_number})" if contact else from_number
             group_text = (
                 f"NOVA MENSAGEM PARA {matched['name'].upper()}\n"
-                f"De: {from_number}\n\n{text}"
+                f"De: {sender_label}\n\n{text}"
             )
             try:
                 await evolution.send_text(matched["group_jid"], group_text, instance=instance_name)
@@ -271,7 +315,6 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     # Em grupos, só responde quando o grupo está vinculado a um departamento ativo
     # da igreja dona da instância (configurado no painel em Departamentos).
-    participant = ""
     if is_group:
         linked_department = (
             db.query(Department)
@@ -284,7 +327,6 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
         )
         if not linked_department:
             return {"ok": True, "skipped": "group_not_linked"}
-        participant = key.get("participant") or ""
 
     message_id = key.get("id") or ""
     if _dedup(message_id):
@@ -302,7 +344,9 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
         return {"ok": True, "skipped": "no_text"}
 
     # Em grupos, guarda quem perguntou (participante); a resposta volta para o grupo.
-    from_number = (_normalize_jid(participant) if is_group else _normalize_jid(remote_jid)) or _normalize_jid(remote_jid)
+    # Usa o número real quando a Evolution o informa (participantPn/senderPn), pois
+    # os novos JIDs @lid do WhatsApp não são telefones.
+    from_number = _sender_phone(data, key, is_group) or _normalize_jid(remote_jid)
 
     log = MessageLog(
         direction="in",

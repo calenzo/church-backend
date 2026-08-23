@@ -14,12 +14,15 @@ from auth import (
 )
 from config import settings
 from database import get_db
-from models import AuthSession, Church, Department, LLMConfig, MessageLog, User, WhatsAppNumber
+from models import AuthSession, Church, Contact, Department, LLMConfig, MessageLog, User, WhatsAppNumber
 from routers.webhook import get_or_create_config
 from schemas import (
     ChurchCreate,
     ChurchOut,
     ChurchUpdate,
+    ContactCreate,
+    ContactOut,
+    ContactUpdate,
     DepartmentCreate,
     DepartmentOut,
     DepartmentUpdate,
@@ -279,6 +282,102 @@ def delete_user(
         raise HTTPException(status_code=400, detail="Não é possível excluir o próprio usuário")
     db.query(AuthSession).filter(AuthSession.user_id == target.id).delete()
     db.delete(target)
+    db.commit()
+
+
+# ----------------------------- Contatos da igreja -----------------------------
+
+
+def _normalize_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) < 10 or len(digits) > 15:
+        raise HTTPException(status_code=400, detail="Número inválido. Use o formato (21) 99906-9940 ou 5521999069940")
+    return digits
+
+
+def _accessible_contact(db: Session, user: User, contact_id: int) -> Contact:
+    contact = db.get(Contact, contact_id)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contato não encontrado")
+    if user.role != "super_admin" and contact.church_id != user.church_id:
+        raise HTTPException(status_code=403, detail="Sem acesso a este contato")
+    return contact
+
+
+@router.get("/churches/{church_id}/contacts", response_model=list[ContactOut])
+def list_contacts(
+    church_id: int,
+    search: str = "",
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _resolve_church(db, user, church_id)
+    query = db.query(Contact).filter(Contact.church_id == church_id)
+    if search.strip():
+        term = f"%{search.strip()}%"
+        query = query.filter((Contact.name.ilike(term)) | (Contact.phone.like(f"%{re.sub(r'[^0-9]', '', search)}%")))
+    return query.order_by(Contact.name).all()
+
+
+@router.post("/churches/{church_id}/contacts", response_model=ContactOut, status_code=201)
+def create_contact(
+    church_id: int,
+    data: ContactCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    church = _resolve_church(db, user, church_id)
+    phone = _normalize_phone(data.phone)
+    existing = db.query(Contact).filter(Contact.church_id == church.id, Contact.phone == phone).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Este número já está cadastrado para esta igreja")
+    contact = Contact(
+        church_id=church.id,
+        phone=phone,
+        name=data.name.strip(),
+        role=data.role.strip(),
+    )
+    db.add(contact)
+    db.commit()
+    db.refresh(contact)
+    return contact
+
+
+@router.put("/contacts/{contact_id}", response_model=ContactOut)
+def update_contact(
+    contact_id: int,
+    data: ContactUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    contact = _accessible_contact(db, user, contact_id)
+    if data.name is not None:
+        contact.name = data.name.strip()
+    if data.role is not None:
+        contact.role = data.role.strip()
+    if data.phone is not None:
+        phone = _normalize_phone(data.phone)
+        clash = (
+            db.query(Contact)
+            .filter(Contact.church_id == contact.church_id, Contact.phone == phone, Contact.id != contact.id)
+            .first()
+        )
+        if clash:
+            raise HTTPException(status_code=400, detail="Este número já está cadastrado para esta igreja")
+        contact.phone = phone
+    db.commit()
+    db.refresh(contact)
+    return contact
+
+
+@router.delete("/contacts/{contact_id}", status_code=204)
+def delete_contact(
+    contact_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    contact = _accessible_contact(db, user, contact_id)
+    db.delete(contact)
     db.commit()
 
 

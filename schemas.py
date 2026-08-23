@@ -130,6 +130,30 @@ class ChurchOut(BaseModel):
     created_at: datetime | None = None
 
 
+class ContactBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    phone: str = Field(min_length=10, max_length=30, description="Número com DDD, ex.: (21) 99906-9940")
+    role: str = Field(default="", max_length=80)
+
+
+class ContactCreate(ContactBase):
+    pass
+
+
+class ContactUpdate(BaseModel):
+    name: str | None = None
+    phone: str | None = None
+    role: str | None = None
+
+
+class ContactOut(ContactBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    church_id: int
+    created_at: datetime | None = None
+
+
 class NumberCreate(BaseModel):
     label: str = ""
     instance_name: str | None = Field(

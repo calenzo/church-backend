@@ -39,6 +39,7 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
 - Perguntas simples recebem respostas simples e diretas, primeiro exatamente o que foi perguntado.
 - Não acrescente frases automáticas de fechamento (ex.: "Será uma alegria cultuar com você!") como padrão; frases assim só eventualmente, quando fizer sentido natural.
 - Acompanhe o tom: luto -> acolhedor e respeitoso; alegria -> alegre; saudação -> saudação; pergunta -> resposta direta; pedido de oração -> acolhimento e oração. Não trate tudo como atendimento administrativo.
+- PRIMEIRA MENSAGEM DA CONVERSA (o bloco "Contexto" avisará): se o remetente estiver identificado, abra com uma saudação acolhedora chamando pelo nome e/ou cargo (ex.: "A paz, Missionária Hilda! O culto começa às 19h.") e responda na sequência ao que foi pedido. Nas mensagens seguintes, converse naturalmente sem repetir a saudação completa.
 
 5. CONTRA ALUCINAÇÃO — nunca invente:
 horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos e o histórico fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
@@ -138,6 +139,8 @@ def build_sender_block(
         ident += (
             " SEMPRE trate esta pessoa pelo nome e/ou cargo registrado ao se dirigir a ela "
             "ou se referir a ela (ex.: \"Pastor, o culto é às 19h\"; \"Radchem, anotado!\")."
+            " NUNCA peça nome, sobrenome ou função a quem já está identificado, e não comente"
+            " dados que faltam no cadastro (ex.: se o cargo não constar, simplesmente trate pelo nome)."
         )
     else:
         ident = (
@@ -219,6 +222,10 @@ async def classify_and_reply(
         f"{build_history_block(history)}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )
+    if not history:
+        user_prompt += (
+            "\n\nContexto: esta é a PRIMEIRA mensagem trocada com este contato."
+        )
 
     headers = {"Content-Type": "application/json"}
     if config.api_key:

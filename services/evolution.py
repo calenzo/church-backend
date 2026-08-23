@@ -141,7 +141,7 @@ async def get_qrcode(instance: str | None = None) -> str | None:
 
 async def create_instance(instance: str) -> None:
     """Cria a instância na Evolution API (novo número ou recriação após reset)."""
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/create/{instance}"
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/create"
     payload = {
         "instanceName": instance,
         "qrcode": True,

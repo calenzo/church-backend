@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Cache em memória para grupos, por instância (evita bater na Evolution API toda página)
 _groups_cache: dict[str, dict] = {}
-GROUPS_CACHE_TTL = 300  # 5 minutos
+GROUPS_CACHE_TTL = 60  # 1 minuto
 
 
 class EvolutionError(Exception):

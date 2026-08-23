@@ -76,22 +76,38 @@ def _digits(phone: str) -> str:
     return re.sub(r"\D", "", phone or "")
 
 
+# Mapeamento aprendido em tempo real: JID @lid -> número real (só dígitos).
+# O WhatsApp novo identifica participantes de grupo por LID, que não é telefone.
+_lid_map: dict[str, str] = {}
+
+
+def _remember_lid(key: dict) -> None:
+    """Sempre que a Evolution mandar o par (participant=@lid, participantPn=telefone),
+    guarda a correspondência para reconhecer o contato nas próximas mensagens."""
+    pn = key.get("participantPn") or key.get("participantPhoneNumber") or ""
+    lid = key.get("participant") or ""
+    if isinstance(pn, str) and pn.endswith("@s.whatsapp.net") and lid.endswith("@lid"):
+        _lid_map[_normalize_jid(lid)] = _normalize_jid(pn)
+
+
 def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
-    """Melhor número real do remetente (LIDs do WhatsApp não são telefones).
-    Preferência: participantPhoneNumber/participantPn -> senderPn -> JID."""
-    candidates = [
+    """Melhor número real do remetente. Preferência: participantPhoneNumber/
+    participantPn -> senderPn -> mapa @lid->telefone -> JID."""
+    for cand in (
         key.get("participantPhoneNumber"),
         key.get("participantPn"),
         data.get("senderPn"),
-        key.get("remoteJid") if not is_group else None,
-        key.get("participant") if is_group else None,
-    ]
-    for cand in candidates:
+    ):
         if cand and isinstance(cand, str):
             digits = _normalize_jid(cand)
             if digits:
                 return digits
-    return ""
+    jid = (key.get("participant") if is_group else key.get("remoteJid")) or ""
+    if jid.endswith("@lid"):
+        mapped = _lid_map.get(_normalize_jid(jid))
+        if mapped:
+            return mapped
+    return _normalize_jid(jid)
 
 
 def _lookup_contact(db: Session, church_id: int | None, phone: str) -> Contact | None:
@@ -203,6 +219,9 @@ async def _process_message(log_id: int, instance_name: str):
             db.commit()
             history = _load_history(db, from_number, log.church_id, exclude_id=log.id)
             contact = _lookup_contact(db, log.church_id, from_number)
+            if contact:
+                detail = contact.name + (f" ({contact.role})" if contact.role else "")
+                _add_step(log, "contato reconhecido", detail=detail)
             sender = {"name": contact.name, "role": contact.role} if contact else None
             result = await llm.classify_and_reply(
                 text, scope_departments, config, history=history, sender=sender
@@ -308,6 +327,7 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     from_me = bool(key.get("fromMe") or data.get("fromMe"))
 
     is_group = remote_jid.endswith("@g.us")
+    _remember_lid(key)  # aprende @lid -> telefone sempre que a Evolution informar os dois
 
     # Ignora mensagens enviadas por nós e canais (aceita JIDs @s.whatsapp.net e @lid)
     if from_me or remote_jid.endswith("@broadcast"):
@@ -362,7 +382,7 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     db.commit()
     db.refresh(log)
 
-    _add_step(log, "mensagem recebida")
+    _add_step(log, "mensagem recebida", detail=f"de: {from_number}")
     if is_group:
         _add_step(log, "pergunta em grupo", detail=linked_department.name)
     db.commit()

@@ -239,12 +239,20 @@ async def _process_message(log_id: int, instance_name: str):
             db.commit()
             history = _load_history(db, from_number, log.church_id, exclude_id=log.id)
             contact = _lookup_contact(db, log.church_id, from_number)
-            if contact:
+            known = bool(contact and (contact.name or "").strip())
+            if known:
                 detail = contact.name + (f" ({contact.role})" if contact.role else "")
                 _add_step(log, "contato reconhecido", detail=detail)
-            sender = {"name": contact.name, "role": contact.role} if contact else None
+            sender = {"name": contact.name, "role": contact.role} if known else None
+            # Contato com linha em branco no cadastro = já convidamos a se identificar antes.
+            asked_before = contact is not None and not known
             result = await llm.classify_and_reply(
-                text, scope_departments, config, history=history, sender=sender
+                text,
+                scope_departments,
+                config,
+                history=history,
+                sender=sender,
+                asked_name_before=asked_before,
             )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
@@ -262,6 +270,45 @@ async def _process_message(log_id: int, instance_name: str):
 
         department_name = result["department"]
         reply = result["reply"]
+
+        # Cadastro automático: a LLM capturou o nome dito pelo remetente.
+        new_name = (result.get("new_contact_name") or "").strip()
+        new_role = (result.get("new_contact_role") or "").strip()
+        if (
+            new_name
+            and log.church_id
+            and from_number.isdigit()
+            and 10 <= len(from_number) <= 13  # telefones reais; LIDs têm ~15+ dígitos
+            and re.search(r"[A-Za-zÀ-ÿ]", new_name)
+        ):
+            phone_store = (
+                from_number[2:] if from_number.startswith("55") and len(from_number) >= 12 else from_number
+            )
+            row = _lookup_contact(db, log.church_id, from_number)
+            try:
+                if row:
+                    row.name = new_name[:160]
+                    if new_role:
+                        row.role = new_role[:80]
+                else:
+                    db.add(
+                        Contact(
+                            church_id=log.church_id,
+                            phone=phone_store,
+                            name=new_name[:160],
+                            role=new_role[:80],
+                        )
+                    )
+                db.commit()
+                _add_step(
+                    log,
+                    "contato salvo pelo whatsapp",
+                    detail=f"{new_name}" + (f" ({new_role})" if new_role else ""),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()  # duplicado ou outro erro de banco não derruba o fluxo
+
         matched = next((d for d in departments if d["name"].lower() == department_name.lower()), None)
         matched_dep = None
         if matched:

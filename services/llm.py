@@ -43,6 +43,14 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
 5. CONTRA ALUCINAÇÃO — nunca invente:
 horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos e o histórico fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
 
+6. CADASTRO AUTOMÁTICO DE CONTATOS:
+- Se o bloco Identidade disser que você nunca perguntou o nome: além de responder a mensagem, inclua na resposta UM convite curto e gentil para a pessoa se apresentar (nome e função na igreja). Uma frase apenas; não insista nas mensagens seguintes.
+- Se a pessoa se apresentar em QUALQUER mensagem (ex.: "aqui é o João", "sou a Maria, da limpeza"), preencha os campos opcionais do JSON:
+  {"department": "...", "reply": "...", "new_contact_name": "<nome dito>", "new_contact_role": "<função, se houver>"}
+  Use EXATAMENTE o que a pessoa disse. Nunca invente nem complete por conta própria.
+- Nos demais casos, omita new_contact_name/new_contact_role (ou deixe "").
+- Depois que o nome estiver salvo no cadastro, trate a pessoa pelo nome normalmente.
+
 Regras operacionais:
 - A mensagem do usuário traz a DATA E HORA atuais no Brasil. Use-as para entender palavras como "hoje", "amanhã" e "próximo". Nunca invente datas ou horários.
 - Responda de maneira curta (máx. 3 frases), em português.
@@ -114,7 +122,7 @@ def build_departments_block(departments: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_sender_block(sender: dict | None) -> str:
+def build_sender_block(sender: dict | None, asked_name_before: bool = False) -> str:
     """Bloco de identidade do remetente, conforme a base de contatos da igreja."""
     if sender and (sender.get("name") or "").strip():
         role = (sender.get("role") or "").strip()
@@ -130,9 +138,21 @@ def build_sender_block(sender: dict | None) -> str:
         ident = (
             "Remetente NÃO cadastrado na base de contatos da igreja. IDENTIDADE DESCONHECIDA: "
             "não invente nome, cargo ou vínculo e não trate a pessoa como visitante/membro/irmão(ã); "
-            "use linguagem neutra. Se perguntarem quem está falando, diga que este número ainda "
-            "não está identificado na sua base de contatos."
+            "use linguagem neutra."
         )
+        if asked_name_before:
+            ident += (
+                " Você JÁ convidou esta pessoa a se identificar antes: NÃO pergunte o nome de novo."
+                " Mas, se ela se apresentar agora, capture com new_contact_name/new_contact_role."
+            )
+        else:
+            ident += (
+                " Você ainda NÃO sabe quem é e nunca perguntou: além de responder o que foi pedido,"
+                " inclua na resposta UM convite curto e gentil para ela se apresentar"
+                " (ex.: \"Aliás, como você se chama?\"). Em contextos delicados (luto, crise,"
+                " pedido urgente), priorize a empatia e deixe o convite para outra hora."
+                " Se a pessoa se apresentar, capture com new_contact_name/new_contact_role."
+            )
     return f"\n\nIdentidade do remetente:\n{ident}"
 
 
@@ -157,18 +177,20 @@ async def classify_and_reply(
     config,
     history: list[dict] | None = None,
     sender: dict | None = None,
+    asked_name_before: bool = False,
 ) -> dict:
-    """Envia a mensagem para a LLM e retorna {"department", "reply"}.
+    """Envia a mensagem para a LLM e retorna {"department", "reply", ...}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
     anteriores deste contato, da mais antiga para a mais recente.
-    `sender` é {"name", "role"} quando o número está na base de contatos da igreja."""
+    `sender` é {"name", "role"} quando o número está na base de contatos da igreja.
+    `asked_name_before` indica que já convidamos este número a se identificar."""
     departments_block = build_departments_block(departments)
     system_prompt = config.system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
 
     user_prompt = (
         f"Data e hora atuais no Brasil: {_now_brasilia()}.\n\n"
         f"Departamentos disponíveis:\n{departments_block}\n"
-        f"{build_sender_block(sender)}\n"
+        f"{build_sender_block(sender, asked_name_before)}\n"
         f"{build_history_block(history)}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )
@@ -205,6 +227,8 @@ async def classify_and_reply(
     return {
         "department": str(result.get("department", "geral")).strip() or "geral",
         "reply": str(result.get("reply", "")).strip(),
+        "new_contact_name": str(result.get("new_contact_name", "")).strip(),
+        "new_contact_role": str(result.get("new_contact_role", "")).strip(),
     }
 
 

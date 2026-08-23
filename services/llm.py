@@ -44,8 +44,9 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
 horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos e o histórico fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
 
 6. CADASTRO AUTOMÁTICO DE CONTATOS:
-- Se o bloco Identidade disser que você nunca perguntou o nome: além de responder a mensagem, inclua na resposta UM convite curto e gentil para a pessoa se apresentar (nome e função na igreja). Uma frase apenas; não insista nas mensagens seguintes.
-- Se a pessoa se apresentar em QUALQUER mensagem (ex.: "aqui é o João", "sou a Maria, da limpeza"), preencha os campos opcionais do JSON:
+- Se o bloco Identidade disser que você nunca perguntou o nome: além de responder a mensagem, inclua na resposta UM convite curto e gentil pedindo NOME E SOBRENOME (ex.: "Posso saber seu nome e sobrenome?"). Uma frase apenas; NUNCA repita o convite em mensagens seguintes, mesmo que a pessoa não responda.
+- Muitos membros têm o mesmo primeiro nome. Se a pessoa se apresentar com um primeiro nome que coincide com mais de uma pessoa já cadastrada (veja a lista no bloco Identidade), pergunte com qual delas se refere citando as opções (ex.: "Paula Karine ou Paula Ignacio?") antes de salvar, e salve sempre o nome completo informado.
+- Quando a pessoa se apresentar em QUALQUER mensagem (ex.: "aqui é o João", "sou a Maria, da limpeza"), preencha os campos opcionais do JSON:
   {"department": "...", "reply": "...", "new_contact_name": "<nome dito>", "new_contact_role": "<função, se houver>"}
   Use EXATAMENTE o que a pessoa disse. Nunca invente nem complete por conta própria.
 - Nos demais casos, omita new_contact_name/new_contact_role (ou deixe "").
@@ -122,7 +123,11 @@ def build_departments_block(departments: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_sender_block(sender: dict | None, asked_name_before: bool = False) -> str:
+def build_sender_block(
+    sender: dict | None,
+    asked_name_before: bool = False,
+    known_names: list[str] | None = None,
+) -> str:
     """Bloco de identidade do remetente, conforme a base de contatos da igreja."""
     if sender and (sender.get("name") or "").strip():
         role = (sender.get("role") or "").strip()
@@ -142,16 +147,26 @@ def build_sender_block(sender: dict | None, asked_name_before: bool = False) -> 
         )
         if asked_name_before:
             ident += (
-                " Você JÁ convidou esta pessoa a se identificar antes: NÃO pergunte o nome de novo."
-                " Mas, se ela se apresentar agora, capture com new_contact_name/new_contact_role."
+                " Você JÁ convidou esta pessoa a se identificar anteriormente: NUNCA pergunte o"
+                " nome de novo, nem reformule o pedido. Espere que ela se apresente naturalmente."
+                " Quando isso acontecer, capture com new_contact_name/new_contact_role."
             )
         else:
             ident += (
                 " Você ainda NÃO sabe quem é e nunca perguntou: além de responder o que foi pedido,"
-                " inclua na resposta UM convite curto e gentil para ela se apresentar"
-                " (ex.: \"Aliás, como você se chama?\"). Em contextos delicados (luto, crise,"
-                " pedido urgente), priorize a empatia e deixe o convite para outra hora."
-                " Se a pessoa se apresentar, capture com new_contact_name/new_contact_role."
+                " inclua na resposta UM convite curto e gentil pedindo NOME E SOBRENOME (muitos"
+                " membros têm o mesmo primeiro nome), ex.: \"Posso saber seu nome e sobrenome?\"."
+                " Faça isso UMA única vez. Em contextos delicados (luto, crise, pedido urgente),"
+                " priorize a empatia e deixe o convite para outra hora."
+            )
+        if known_names:
+            nomes = ", ".join(n.strip() for n in known_names[:120] if n.strip())
+            ident += f"\nPessoas já cadastradas na igreja: {nomes}."
+            ident += (
+                " Se a pessoa disser apenas um primeiro nome que aparece em MAIS DE UMA dessas"
+                " pessoas (ex.: existem \"Paula Karine\" e \"Paula Ignacio\" e ela disse só \"Paula\"),"
+                " pergunte com qual se refere citando as opções (\"Paula Karine ou Paula Ignacio?\")"
+                " ANTES de salvar, e salve o nome completo."
             )
     return f"\n\nIdentidade do remetente:\n{ident}"
 
@@ -178,19 +193,21 @@ async def classify_and_reply(
     history: list[dict] | None = None,
     sender: dict | None = None,
     asked_name_before: bool = False,
+    known_names: list[str] | None = None,
 ) -> dict:
     """Envia a mensagem para a LLM e retorna {"department", "reply", ...}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
     anteriores deste contato, da mais antiga para a mais recente.
     `sender` é {"name", "role"} quando o número está na base de contatos da igreja.
-    `asked_name_before` indica que já convidamos este número a se identificar."""
+    `asked_name_before` indica que já convidamos este número a se identificar.
+    `known_names` são os nomes já cadastrados na igreja (para desambiguar nomes iguais)."""
     departments_block = build_departments_block(departments)
     system_prompt = config.system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
 
     user_prompt = (
         f"Data e hora atuais no Brasil: {_now_brasilia()}.\n\n"
         f"Departamentos disponíveis:\n{departments_block}\n"
-        f"{build_sender_block(sender, asked_name_before)}\n"
+        f"{build_sender_block(sender, asked_name_before, known_names)}\n"
         f"{build_history_block(history)}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )

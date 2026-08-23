@@ -246,6 +246,13 @@ async def _process_message(log_id: int, instance_name: str):
             sender = {"name": contact.name, "role": contact.role} if known else None
             # Contato com linha em branco no cadastro = já convidamos a se identificar antes.
             asked_before = contact is not None and not known
+            known_names = None
+            if not known:
+                known_names = [
+                    c.name
+                    for c in db.query(Contact).filter(Contact.church_id == log.church_id).all()
+                    if (c.name or "").strip()
+                ]
             result = await llm.classify_and_reply(
                 text,
                 scope_departments,
@@ -253,6 +260,7 @@ async def _process_message(log_id: int, instance_name: str):
                 history=history,
                 sender=sender,
                 asked_name_before=asked_before,
+                known_names=known_names,
             )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
@@ -274,16 +282,14 @@ async def _process_message(log_id: int, instance_name: str):
         # Cadastro automático: a LLM capturou o nome dito pelo remetente.
         new_name = (result.get("new_contact_name") or "").strip()
         new_role = (result.get("new_contact_role") or "").strip()
-        if (
-            new_name
-            and log.church_id
-            and from_number.isdigit()
-            and 10 <= len(from_number) <= 13  # telefones reais; LIDs têm ~15+ dígitos
-            and re.search(r"[A-Za-zÀ-ÿ]", new_name)
-        ):
-            phone_store = (
-                from_number[2:] if from_number.startswith("55") and len(from_number) >= 12 else from_number
-            )
+        phone_ok = bool(
+            log.church_id and from_number.isdigit() and 10 <= len(from_number) <= 13
+        )  # telefones reais; LIDs têm ~15+ dígitos
+        phone_store = (
+            from_number[2:] if from_number.startswith("55") and len(from_number) >= 12 else from_number
+        )
+
+        if new_name and phone_ok and re.search(r"[A-Za-zÀ-ÿ]", new_name):
             row = _lookup_contact(db, log.church_id, from_number)
             try:
                 if row:
@@ -308,6 +314,15 @@ async def _process_message(log_id: int, instance_name: str):
                 db.commit()
             except Exception:
                 db.rollback()  # duplicado ou outro erro de banco não derruba o fluxo
+
+        elif contact is None and phone_ok:
+            # Sem nome capturado: registra o número como "já convidado a se identificar"
+            # (linha com nome em branco), para a IA NÃO perguntar o nome toda hora.
+            try:
+                db.add(Contact(church_id=log.church_id, phone=phone_store, name="", role=""))
+                db.commit()
+            except Exception:
+                db.rollback()
 
         matched = next((d for d in departments if d["name"].lower() == department_name.lower()), None)
         matched_dep = None

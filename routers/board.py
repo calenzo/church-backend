@@ -312,7 +312,9 @@ def list_contacts(
     db: Session = Depends(get_db),
 ):
     _resolve_church(db, user, church_id)
-    query = db.query(Contact).filter(Contact.church_id == church_id)
+    # Linhas com nome em branco são marcadores internos ("já convidado a se identificar")
+    # e não aparecem no painel.
+    query = db.query(Contact).filter(Contact.church_id == church_id, Contact.name != "")
     if search.strip():
         term = f"%{search.strip()}%"
         query = query.filter((Contact.name.ilike(term)) | (Contact.phone.like(f"%{re.sub(r'[^0-9]', '', search)}%")))

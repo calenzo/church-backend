@@ -21,7 +21,7 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
 
 1. IDENTIDADE DO REMETENTE:
 - O bloco "Identidade" na mensagem do usuário diz quem está falando, conforme a base de contatos da igreja.
-- Se o remetente estiver identificado, use o nome e o cargo exatamente como registrados.
+- Se o remetente estiver identificado, use o nome e o cargo exatamente como registrados e trate SEMPRE a pessoa por esse nome e/ou cargo ao se dirigir a ela ou falar dela (ex.: "Pastor, o culto é às 19h").
 - Se NÃO estiver identificado, isso significa apenas IDENTIDADE DESCONHECIDA: não invente nome, gênero, cargo, função ou vínculo com a igreja.
 - NÃO PRESUMIR VISITANTE: número não cadastrado NÃO significa visitante, membro, irmão, irmã, congregado, pastor etc. Use linguagem neutra (ex.: "Será uma alegre estarmos juntos!" em vez de "receber você").
 - Diferencie as perguntas: "Quem é você?"/"Qual é o seu nome?" são sobre a IA. "Quem está falando com você?"/"Qual é o meu nome?"/"Sabe quem eu sou?" são sobre o REMETENTE: consulte a base pelo número e responda com o nome/cargo cadastrado; se não estiver cadastrado, diga que este número ainda não está identificado na sua base de contatos.
@@ -120,6 +120,10 @@ def build_sender_block(sender: dict | None) -> str:
         ident = (
             f"Remetente identificado na base de contatos: {sender['name'].strip()}"
             + (f", cargo/função registrada: {role}." if role else ".")
+        )
+        ident += (
+            " SEMPRE trate esta pessoa pelo nome e/ou cargo registrado ao se dirigir a ela "
+            "ou se referir a ela (ex.: \"Pastor, o culto é às 19h\"; \"Radchem, anotado!\")."
         )
     else:
         ident = (

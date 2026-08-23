@@ -202,7 +202,15 @@ async def classify_and_reply(
     `asked_name_before` indica que já convidamos este número a se identificar.
     `known_names` são os nomes já cadastrados na igreja (para desambiguar nomes iguais)."""
     departments_block = build_departments_block(departments)
-    system_prompt = config.system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
+    # As regras de comportamento valem SEMPRE; o texto personalizado da igreja
+    # entra como complemento, nunca substituindo as regras fundamentais.
+    custom = (getattr(config, "system_prompt", "") or "").strip()
+    system_prompt = DEFAULT_SYSTEM_PROMPT
+    if custom:
+        system_prompt += (
+            "\n\nINSTRUÇÕES ADICIONAIS DA IGREJA (complementam, mas NUNCA anulam "
+            "as regras acima):\n" + custom
+        )
 
     user_prompt = (
         f"Data e hora atuais no Brasil: {_now_brasilia()}.\n\n"

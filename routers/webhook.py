@@ -146,6 +146,39 @@ def _lookup_contact(db: Session, church_id: int | None, phone: str) -> Contact |
     )
 
 
+# Frases de apresentação: "meu nome é X", "sou o Y", "aqui é a Z" etc.
+_SELF_NAME_RE = re.compile(
+    r"(?:meu nome (?:é|e)|me chamo|aqui (?:é|e)\s+[oa]|eu\s+sou\s+[oa]|sou\s+[oa])\s+"
+    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ']*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ']+){0,3})",
+    re.IGNORECASE,
+)
+_ROLE_WORDS = {
+    "irmã", "irma", "irmão", "irmao", "missionária", "missionaria", "diaconisa",
+    "diácono", "diacono", "presbítero", "presbitero", "evangelista",
+    "pastor", "pastora", "reverendo",
+}
+
+
+def _extract_self_name(text: str) -> tuple[str, str]:
+    """Extrai (nome, cargo) de frases de apresentação, sem depender da LLM."""
+    match = _SELF_NAME_RE.search(text or "")
+    if not match:
+        return "", ""
+    words = match.group(1).strip().strip("!,.?;:").split()
+    role = ""
+    name_words = []
+    for word in words:
+        clean = word.strip(".,")
+        if not name_words and clean.lower() in _ROLE_WORDS:
+            role = clean.title()
+        else:
+            name_words.append(clean)
+    name = " ".join(name_words)
+    if not (2 <= len(name) <= 60) or not re.search(r"[A-Za-zÀ-ÿ]", name):
+        return "", ""
+    return name, role
+
+
 def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
     """Registra um passo do fluxo no campo steps (JSON) para o dashboard."""
     try:
@@ -279,9 +312,13 @@ async def _process_message(log_id: int, instance_name: str):
         department_name = result["department"]
         reply = result["reply"]
 
-        # Cadastro automático: a LLM capturou o nome dito pelo remetente.
+        # Cadastro automático: nome dito pelo remetente (LLM) ou extraído da frase.
         new_name = (result.get("new_contact_name") or "").strip()
         new_role = (result.get("new_contact_role") or "").strip()
+        if not new_name and not known:
+            fb_name, fb_role = _extract_self_name(text)
+            if fb_name:
+                new_name, new_role = fb_name, (new_role or fb_role)
         phone_ok = bool(
             log.church_id and from_number.isdigit() and 10 <= len(from_number) <= 13
         )  # telefones reais; LIDs têm ~15+ dígitos

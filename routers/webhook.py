@@ -79,6 +79,9 @@ def _digits(phone: str) -> str:
 # Mapeamento aprendido em tempo real: JID @lid -> número real (só dígitos).
 # O WhatsApp novo identifica participantes de grupo por LID, que não é telefone.
 _lid_map: dict[str, str] = {}
+# Nome informado pelo próprio remetente quando o número ainda não foi resolvido
+# (LID sem pareamento): vale enquanto o processo estiver de pé.
+_lid_name_map: dict[str, dict[str, str]] = {}
 
 
 def _remember_lid(key: dict) -> None:
@@ -90,24 +93,33 @@ def _remember_lid(key: dict) -> None:
         _lid_map[_normalize_jid(lid)] = _normalize_jid(pn)
 
 
-async def _learn_group_lids(instance_name: str, group_jid: str) -> None:
+async def _learn_group_lids(instance_name: str, group_jid: str) -> tuple[int, int]:
     """Busca os participantes do grupo na Evolution e aprende @lid -> telefone.
-    Garante o reconhecimento de contatos em TODOS os grupos vinculados."""
+    Retorna (total de participantes, lids mapeados com sucesso)."""
     try:
         participants = await evolution.fetch_group_participants(instance_name, group_jid)
     except Exception as exc:
         logger.warning("Não foi possível buscar participantes de %s: %s", group_jid, exc)
-        return
+        return 0, 0
+    learned = 0
     for p in participants:
-        pid = p.get("id") or p.get("jid") or ""
-        phone = p.get("phoneNumber") or p.get("pn") or ""
-        if (
-            isinstance(pid, str) and pid.endswith("@lid")
-            and isinstance(phone, str) and phone
-        ):
-            digits = _normalize_jid(phone)
+        pid = p.get("id") or p.get("jid") or p.get("participant") or ""
+        phone = (
+            p.get("phoneNumber")
+            or p.get("participantPhoneNumber")
+            or p.get("pn")
+            or p.get("phone")
+            or ""
+        )
+        if isinstance(pid, str) and pid.endswith("@lid") and phone:
+            digits = _normalize_jid(str(phone))
             if digits:
                 _lid_map[_normalize_jid(pid)] = digits
+                learned += 1
+    logger.info(
+        "Grupo %s: %d participantes, %d LIDs mapeados", group_jid, len(participants), learned
+    )
+    return len(participants), learned
 
 
 def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
@@ -132,18 +144,34 @@ def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
 
 def _lookup_contact(db: Session, church_id: int | None, phone: str) -> Contact | None:
     """Encontra o contato cadastrado pelo número do remetente (só dígitos).
-    Tolerante ao DDI 55: cadastro '219999069940' casa com JID '55219999069940'."""
+    Tolerante ao DDI 55: cadastro '219999069940' casa com JID '55219999069940'.
+    Prefere contatos com nome; linhas em branco (marcadores) ficam por último.
+    Para LIDs ainda não pareados, usa o nome que o próprio remetente informou."""
     digits = _digits(phone)
     if not digits or not church_id:
         return None
     candidates = [digits]
     if digits.startswith("55") and len(digits) >= 12:
         candidates.append(digits[2:])
-    return (
+    rows = (
         db.query(Contact)
         .filter(Contact.church_id == church_id, Contact.phone.in_(candidates))
-        .first()
+        .all()
     )
+    for row in rows:
+        if (row.name or "").strip():
+            return row
+    remembered = _lid_name_map.get(digits)
+    if remembered:
+        return Contact(
+            church_id=church_id,
+            phone=digits,
+            name=remembered.get("name", ""),
+            role=remembered.get("role", ""),
+        )
+    if rows:
+        return rows[0]
+    return None
 
 
 # Frases de apresentação: "meu nome é X", "sou o Y", "aqui é a Z" etc.
@@ -323,7 +351,9 @@ async def _process_message(log_id: int, instance_name: str):
             log.church_id and from_number.isdigit() and 10 <= len(from_number) <= 13
         )  # telefones reais; LIDs têm ~15+ dígitos
         phone_store = (
-            from_number[2:] if from_number.startswith("55") and len(from_number) >= 12 else from_number
+            from_number[2:]
+            if from_number.startswith("55") and 12 <= len(from_number) <= 13
+            else from_number
         )
 
         if new_name and phone_ok and re.search(r"[A-Za-zÀ-ÿ]", new_name):
@@ -352,8 +382,19 @@ async def _process_message(log_id: int, instance_name: str):
             except Exception:
                 db.rollback()  # duplicado ou outro erro de banco não derruba o fluxo
 
-        elif contact is None and phone_ok:
-            # Sem nome capturado: registra o número como "já convidado a se identificar"
+        elif new_name and from_number.isdigit() and re.search(r"[A-Za-zÀ-ÿ]", new_name):
+            # LID ainda sem telefone resolvido: memoriza o nome em memória e
+            # registra o marcador para NÃO repetir o convite.
+            _lid_name_map[from_number] = {"name": new_name[:160], "role": new_role[:80]}
+            _add_step(
+                log,
+                "nome memorizado (número do grupo ainda não resolvido)",
+                detail=new_name,
+            )
+            db.commit()
+
+        elif contact is None and log.church_id and from_number.isdigit() and len(from_number) >= 10:
+            # Sem nome capturado: registra como "já convidado a se identificar"
             # (linha com nome em branco), para a IA NÃO perguntar o nome toda hora.
             try:
                 db.add(Contact(church_id=log.church_id, phone=phone_store, name="", role=""))
@@ -489,11 +530,14 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     # Participante @lid sem número resolvido: consulta os participantes do grupo
     # para aprender a correspondência e reconhecer o contato em qualquer grupo.
+    learn_info = ""
     if is_group and (key.get("participant") or "").endswith("@lid"):
-        mapped = _lid_map.get(_normalize_jid(key["participant"]))
+        lid_key = _normalize_jid(key["participant"])
+        mapped = _lid_map.get(lid_key)
         if not mapped:
-            await _learn_group_lids(instance_name, remote_jid)
-        mapped = mapped or _lid_map.get(_normalize_jid(key["participant"]))
+            total, learned = await _learn_group_lids(instance_name, remote_jid)
+            learn_info = f"{learned} de {total} participantes com telefone informado"
+        mapped = mapped or _lid_map.get(lid_key)
         if mapped:
             from_number = mapped
 
@@ -514,6 +558,21 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     _add_step(log, "mensagem recebida", detail=f"de: {from_number}")
     if is_group:
         _add_step(log, "pergunta em grupo", detail=linked_department.name)
+        participant_jid = key.get("participant") or ""
+        if participant_jid.endswith("@lid"):
+            if from_number != _normalize_jid(participant_jid):
+                _add_step(
+                    log,
+                    "participante resolvido",
+                    detail=f"{participant_jid} -> {from_number}",
+                )
+            else:
+                _add_step(
+                    log,
+                    "participante @lid sem telefone no grupo",
+                    status="warn",
+                    detail=learn_info or "busca ainda não realizada",
+                )
     db.commit()
     logger.info("Mensagem %s recebida de %s: %s", log.id, from_number, text[:80] or "(áudio)")
 

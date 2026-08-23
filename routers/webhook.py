@@ -133,6 +133,15 @@ async def _process_message(log_id: int, instance_name: str):
         from_number = log.from_number
         media_key = log.media_key or None
 
+        # Mensagem de grupo: a conversa acontece no grupo de um departamento;
+        # restringe o contexto ao(s) departamento(s) daquele grupo e responde nele.
+        reply_in_group = bool(log.to_jid and log.to_jid.endswith("@g.us"))
+        scope_departments = departments
+        if reply_in_group:
+            linked = [d for d in departments if d["group_jid"] == log.to_jid]
+            if linked:
+                scope_departments = linked
+
         try:
             if media_key:
                 _add_step(log, "baixando mídia (áudio)")
@@ -154,7 +163,7 @@ async def _process_message(log_id: int, instance_name: str):
             _add_step(log, "classificando com a LLM")
             db.commit()
             history = _load_history(db, from_number, log.church_id, exclude_id=log.id)
-            result = await llm.classify_and_reply(text, departments, config, history=history)
+            result = await llm.classify_and_reply(text, scope_departments, config, history=history)
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
             log.error = str(exc)
@@ -183,8 +192,9 @@ async def _process_message(log_id: int, instance_name: str):
         _add_step(log, "classificado", detail=f"departamento: {department_name}")
         db.commit()
 
-        # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo configurado
-        if matched and matched.get("group_jid"):
+        # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo
+        #    configurado e a pergunta não tenha vindo do próprio grupo dele.
+        if matched and matched.get("group_jid") and matched["group_jid"] != log.to_jid:
             group_text = (
                 f"NOVA MENSAGEM PARA {matched['name'].upper()}\n"
                 f"De: {from_number}\n\n{text}"
@@ -199,13 +209,13 @@ async def _process_message(log_id: int, instance_name: str):
                 log.status = "routed_with_error"
                 _add_step(log, "falha ao encaminhar ao grupo", status="error", detail=str(exc))
 
-        # 2) Envia a resposta da LLM de volta para o membro (no mesmo JID da conversa,
-        #    preservando @lid/@s.whatsapp.net conforme recebido)
+        # 2) Envia a resposta da LLM: em grupo, responde no próprio grupo;
+        #    no privado, no mesmo JID da conversa (preservando @lid/@s.whatsapp.net)
         if reply:
             reply_jid = log.to_jid or f"{from_number}@s.whatsapp.net"
             try:
                 await evolution.send_text(reply_jid, reply, instance=instance_name)
-                _add_step(log, "resposta enviada ao membro")
+                _add_step(log, "resposta enviada ao grupo" if reply_in_group else "resposta enviada ao membro")
             except evolution.EvolutionError as exc:
                 logger.error("Falha ao responder %s: %s", from_number, exc)
                 log.error = log.error or ""
@@ -253,9 +263,28 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     remote_jid = key.get("remoteJid") or data.get("remoteJid") or ""
     from_me = bool(key.get("fromMe") or data.get("fromMe"))
 
-    # Ignora mensagens enviadas por nós, grupos e canais (aceita JIDs @s.whatsapp.net e @lid)
-    if from_me or remote_jid.endswith("@g.us") or remote_jid.endswith("@broadcast"):
+    is_group = remote_jid.endswith("@g.us")
+
+    # Ignora mensagens enviadas por nós e canais (aceita JIDs @s.whatsapp.net e @lid)
+    if from_me or remote_jid.endswith("@broadcast"):
         return {"ok": True, "skipped": "not_private_or_from_me"}
+
+    # Em grupos, só responde quando o grupo está vinculado a um departamento ativo
+    # da igreja dona da instância (configurado no painel em Departamentos).
+    participant = ""
+    if is_group:
+        linked_department = (
+            db.query(Department)
+            .filter(
+                Department.active == True,  # noqa: E712
+                Department.church_id == church_id,
+                Department.group_jid == remote_jid,
+            )
+            .first()
+        )
+        if not linked_department:
+            return {"ok": True, "skipped": "group_not_linked"}
+        participant = key.get("participant") or ""
 
     message_id = key.get("id") or ""
     if _dedup(message_id):
@@ -272,7 +301,8 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     if not text and not media_key:
         return {"ok": True, "skipped": "no_text"}
 
-    from_number = _normalize_jid(remote_jid)
+    # Em grupos, guarda quem perguntou (participante); a resposta volta para o grupo.
+    from_number = (_normalize_jid(participant) if is_group else _normalize_jid(remote_jid)) or _normalize_jid(remote_jid)
 
     log = MessageLog(
         direction="in",
@@ -289,6 +319,8 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     db.refresh(log)
 
     _add_step(log, "mensagem recebida")
+    if is_group:
+        _add_step(log, "pergunta em grupo", detail=linked_department.name)
     db.commit()
     logger.info("Mensagem %s recebida de %s: %s", log.id, from_number, text[:80] or "(áudio)")
 

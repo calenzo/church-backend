@@ -90,6 +90,26 @@ def _primary_instance(db: Session, church_id: int | None) -> str | None:
     return number.instance_name if number else None
 
 
+async def _connected_instance(db: Session, church_id: int) -> str | None:
+    """Retorna a instancia ativa que esteja realmente conectada (state=open).
+    Cai para a primeira ativa se nenhuma estiver conectada."""
+    numbers = (
+        db.query(WhatsAppNumber)
+        .filter(WhatsAppNumber.church_id == church_id, WhatsAppNumber.active == True)  # noqa: E712
+        .order_by(WhatsAppNumber.id)
+        .all()
+    )
+    if not numbers:
+        return None
+    for number in numbers:
+        try:
+            if await evolution.ping(number.instance_name, max_retries=1) == "open":
+                return number.instance_name
+        except Exception:
+            continue
+    return numbers[0].instance_name
+
+
 # ----------------------------- Auth -----------------------------
 
 
@@ -579,7 +599,7 @@ async def evolution_groups(
     db: Session = Depends(get_db),
 ):
     church = _resolve_church(db, user, church_id)
-    instance = _primary_instance(db, church.id)
+    instance = await _connected_instance(db, church.id)
     if not instance:
         raise HTTPException(status_code=400, detail="Cadastre um número do WhatsApp para esta igreja")
     try:

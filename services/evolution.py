@@ -74,6 +74,12 @@ async def list_groups(
 
         if resp.status_code == 429 or resp.status_code >= 500:
             body = resp.text[:300]
+            if "connection closed" in resp.text.lower():
+                # Sessao do WhatsApp fechada: nao adianta tentar de novo.
+                raise EvolutionError(
+                    "O WhatsApp desta conexao esta desconectado. Va na aba Numeros e clique em "
+                    "Conectar para reescanear o QR code antes de listar os grupos."
+                )
             last_error = EvolutionError(f"HTTP {resp.status_code}: {body}")
             logger.warning(
                 "list_groups attempt %d/%d got HTTP %d, retrying...",
@@ -83,6 +89,13 @@ async def list_groups(
             continue
 
         if resp.status_code != 200:
+            body_lower = resp.text.lower()
+            if resp.status_code >= 500 and "connection closed" in body_lower:
+                # Sessao do WhatsApp fechada: nao adianta tentar de novo.
+                raise EvolutionError(
+                    "O WhatsApp desta conexao esta desconectado. Va na aba Numeros e clique em "
+                    "Conectar para reescanear o QR code antes de listar os grupos."
+                )
             raise EvolutionError(
                 f"Evolution API retornou HTTP {resp.status_code} em GET {url}: {resp.text[:300]}"
             )

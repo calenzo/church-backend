@@ -130,6 +130,24 @@ async def list_groups(
     )
 
 
+async def fetch_group_participants(instance: str | None = None, group_jid: str = "") -> list[dict]:
+    """Retorna os participantes de um grupo. Usado para aprender a correspondência
+    entre o JID @lid (ID opaco do WhatsApp) e o número real de cada membro."""
+    inst = instance or settings.evolution_instance
+    base = settings.evolution_base_url.rstrip("/")
+    url = f"{base}/group/fetchParticipants/{inst}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, params={"groupJid": group_jid}, headers=_headers())
+    if resp.status_code != 200:
+        raise EvolutionError(f"HTTP {resp.status_code} em fetchParticipants: {resp.text[:200]}")
+    data = resp.json()
+    if isinstance(data, list):
+        return [p for p in data if isinstance(p, dict)]
+    if isinstance(data, dict):
+        return [p for p in (data.get("participants") or []) if isinstance(p, dict)]
+    return []
+
+
 async def get_qrcode(instance: str | None = None) -> str | None:
     """Retorna o QR code (base64) para parear o WhatsApp, ou None se já conectado.
     Se a instância não existir mais (404), tenta recriá-la antes de buscar o QR."""

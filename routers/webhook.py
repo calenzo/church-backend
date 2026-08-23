@@ -90,6 +90,26 @@ def _remember_lid(key: dict) -> None:
         _lid_map[_normalize_jid(lid)] = _normalize_jid(pn)
 
 
+async def _learn_group_lids(instance_name: str, group_jid: str) -> None:
+    """Busca os participantes do grupo na Evolution e aprende @lid -> telefone.
+    Garante o reconhecimento de contatos em TODOS os grupos vinculados."""
+    try:
+        participants = await evolution.fetch_group_participants(instance_name, group_jid)
+    except Exception as exc:
+        logger.warning("Não foi possível buscar participantes de %s: %s", group_jid, exc)
+        return
+    for p in participants:
+        pid = p.get("id") or p.get("jid") or ""
+        phone = p.get("phoneNumber") or p.get("pn") or ""
+        if (
+            isinstance(pid, str) and pid.endswith("@lid")
+            and isinstance(phone, str) and phone
+        ):
+            digits = _normalize_jid(phone)
+            if digits:
+                _lid_map[_normalize_jid(pid)] = digits
+
+
 def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
     """Melhor número real do remetente. Preferência: participantPhoneNumber/
     participantPn -> senderPn -> mapa @lid->telefone -> JID."""
@@ -367,6 +387,16 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     # Usa o número real quando a Evolution o informa (participantPn/senderPn), pois
     # os novos JIDs @lid do WhatsApp não são telefones.
     from_number = _sender_phone(data, key, is_group) or _normalize_jid(remote_jid)
+
+    # Participante @lid sem número resolvido: consulta os participantes do grupo
+    # para aprender a correspondência e reconhecer o contato em qualquer grupo.
+    if is_group and (key.get("participant") or "").endswith("@lid"):
+        mapped = _lid_map.get(_normalize_jid(key["participant"]))
+        if not mapped:
+            await _learn_group_lids(instance_name, remote_jid)
+        mapped = mapped or _lid_map.get(_normalize_jid(key["participant"]))
+        if mapped:
+            from_number = mapped
 
     log = MessageLog(
         direction="in",

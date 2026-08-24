@@ -12,9 +12,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redisdata:/data
     restart: unless-stopped
 
   evolution:
@@ -33,6 +30,8 @@ services:
       CACHE_REDIS_PREFIX_KEY: evolution
       CACHE_REDIS_SAVE_INSTANCES: "true"
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-MUDAR_ESTA_CHAVE}
+      # Dentro da rede Docker o backend é alcançado pelo nome do serviço.
+      # Para acesso externo, troque por http://<IP-DA-MAQUINA>:8000/webhook/evolution
       WEBHOOK_GLOBAL_URL: http://backend:8000/webhook/evolution
     depends_on:
       - postgres
@@ -54,4 +53,3 @@ services:
 
 volumes:
   pgdata:
-  redisdata:

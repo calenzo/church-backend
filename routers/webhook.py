@@ -195,6 +195,30 @@ def _load_memory_block(db: Session, contact: Contact | None) -> str:
     return "\n\nMemória do contato:\n" + "\n".join(parts)
 
 
+def _build_directory(db: Session, church_id: int | None, limit: int = 150) -> str:
+    """Monta o bloco 'Diretório de contatos' com nome, cargo e telefone da base.
+    Permite à IA informar o contato de membros/líderes cadastrados sem inventar."""
+    if not church_id:
+        return ""
+    rows = (
+        db.query(Contact)
+        .filter(Contact.church_id == church_id, Contact.name != "")
+        .order_by(Contact.name)
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return ""
+    lines = []
+    for c in rows:
+        label = c.name.strip() + (f" ({c.role.strip()})" if (c.role or "").strip() else "")
+        lines.append(f"- {label}: {_fmt_phone(c.phone)}")
+    return (
+        "\n\nDiretório de contatos da igreja (agenda oficial; pode informar "
+        "telefone e cargo destas pessoas quando pedirem):\n" + "\n".join(lines)
+    )
+
+
 def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
     """Melhor número real do remetente. Preferência: participantPhoneNumber/
     participantPn -> senderPn -> mapa @lid->telefone -> JID."""
@@ -456,6 +480,10 @@ async def _process_message(log_id: int, instance_name: str):
                 _add_step(log, "contato reconhecido", detail=detail)
             sender = {"name": contact.name, "role": contact.role} if known else None
             memory_text = _load_memory_block(db, contact)
+            # Diretório da agenda oficial (igreja inteira): disponível em conversas
+            # privadas E em todos os grupos, para a IA informar nome/cargo/telefone
+            # de quem está cadastrado sem recusar nem inventar.
+            directory_text = _build_directory(db, log.church_id)
             # Contato com linha em branco no cadastro = já convidamos a se identificar antes.
             asked_before = contact is not None and not known
             known_names = None
@@ -475,6 +503,7 @@ async def _process_message(log_id: int, instance_name: str):
                 known_names=known_names,
                 routing_rules=routing_rules,
                 memory_text=memory_text,
+                directory_text=directory_text,
             )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"

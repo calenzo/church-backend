@@ -193,11 +193,11 @@ async def create_instance(instance: str) -> None:
 
 async def _connect_raw(number: str | None = None, instance: str | None = None) -> dict:
     inst = instance or settings.evolution_instance
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{inst}"
-    params = {"number": number} if number else None
+    suffix = f"/{number}" if number else ""
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{inst}{suffix}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, params=params, headers=_headers())
+            resp = await client.get(url, headers=_headers())
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:

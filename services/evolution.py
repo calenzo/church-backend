@@ -298,6 +298,8 @@ async def get_pairing_code(number: str, instance: str | None = None) -> dict:
     data = await _connect_with_autocreate(number, inst)
     pairing = data.get("pairingCode")
     base64_qr = data.get("base64")
+
+    print('data ::', data)
     if pairing:
         return {"pairingCode": pairing}
     if base64_qr:

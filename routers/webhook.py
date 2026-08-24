@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal, get_db
-from models import Church, Contact, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
+from models import Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
 
 logger = logging.getLogger(__name__)
@@ -145,6 +145,53 @@ async def _learn_group_lids(instance_name: str, group_jid: str) -> tuple[int, in
         "Grupo %s: %d participantes, %d LIDs mapeados", group_jid, len(participants), learned
     )
     return len(participants), learned
+
+
+def _load_memory_block(db: Session, contact: Contact | None) -> str:
+    """Monta o bloco 'Memória do contato': ficha, pendências abertas e fatos recentes.
+    Memórias temporárias expiradas são ignoradas."""
+    if contact is None or not getattr(contact, "id", None):
+        return ""
+    now = datetime.utcnow()
+    parts = []
+    ficha = []
+    if (contact.contact_type or "").strip():
+        ficha.append(f"tipo: {contact.contact_type}")
+    if (contact.department_name or "").strip():
+        ficha.append(f"departamento: {contact.department_name}")
+    if (contact.last_intent or "").strip():
+        ficha.append(f"última intenção: {contact.last_intent}")
+    if ficha:
+        parts.append("Ficha: " + "; ".join(ficha) + ".")
+    if (contact.resumo_contexto or "").strip():
+        parts.append(f"Resumo do contexto: {contact.resumo_contexto}")
+
+    actives = (
+        db.query(ContactMemory)
+        .filter(
+            ContactMemory.contact_id == contact.id,
+            (ContactMemory.expires_at.is_(None))
+            | (ContactMemory.memory_type == "permanente")
+            | (ContactMemory.expires_at >= now),
+        )
+        .order_by(ContactMemory.created_at.desc(), ContactMemory.id.desc())
+        .limit(20)
+        .all()
+    )
+    pends = [m for m in actives if m.kind == "pendencia" and m.status != "resolvida"]
+    facts = [m for m in actives if m.kind in ("fato", "observacao")][:6]
+    if pends:
+        lines = [
+            f"- {m.content}" + (f" (responsável: {m.responsible})" if m.responsible else "")
+            for m in pends[:5]
+        ]
+        parts.append("Pendências abertas:\n" + "\n".join(lines))
+    if facts:
+        lines = [f"- {m.content}" for m in facts]
+        parts.append("Fatos/observações recentes:\n" + "\n".join(lines))
+    if not parts:
+        return ""
+    return "\n\nMemória do contato:\n" + "\n".join(parts)
 
 
 def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
@@ -342,6 +389,7 @@ async def _process_message(log_id: int, instance_name: str):
                 detail = contact.name + (f" ({contact.role})" if contact.role else "")
                 _add_step(log, "contato reconhecido", detail=detail)
             sender = {"name": contact.name, "role": contact.role} if known else None
+            memory_text = _load_memory_block(db, contact)
             # Contato com linha em branco no cadastro = já convidamos a se identificar antes.
             asked_before = contact is not None and not known
             known_names = None
@@ -360,6 +408,7 @@ async def _process_message(log_id: int, instance_name: str):
                 asked_name_before=asked_before,
                 known_names=known_names,
                 routing_rules=routing_rules,
+                memory_text=memory_text,
             )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
@@ -381,6 +430,13 @@ async def _process_message(log_id: int, instance_name: str):
         # Encaminhamento automático: a IA apontou uma regra; o sistema executa
         # e só confirma ao remetente se o envio realmente aconteceu.
         rule = rules_map.get(str(result.get("forward_rule_id") or ""))
+        # Escrita automática de memória: exige contato persistido e não bloqueado.
+        persistable = bool(
+            contact is not None
+            and getattr(contact, "id", None)
+            and log.church_id
+            and not contact.memory_locked
+        )
         if rule:
             alvo = rule.responsible.strip() or "o responsável pelo assunto"
             if known and contact:
@@ -410,6 +466,21 @@ async def _process_message(log_id: int, instance_name: str):
                     _forward_recently[dedup_key] = datetime.utcnow()
                     reply = f"Sua mensagem foi encaminhada para {alvo}."
                     _add_step(log, "encaminhado para o responsável", detail=f"{alvo} ({destino})")
+                    if persistable:
+                        # Registra a pendência: alguém precisa responder essa pessoa.
+                        db.add(
+                            ContactMemory(
+                                church_id=log.church_id,
+                                contact_id=contact.id,
+                                kind="pendencia",
+                                content=f"{rule.topic} - aguardando {alvo}",
+                                responsible=alvo[:120],
+                                status="aberta",
+                                source="automatica",
+                            )
+                        )
+                        contact.last_intent = f"encaminhar: {rule.topic}"[:160]
+                        contact.last_talk_at = datetime.utcnow()
                     db.commit()
                 except evolution.EvolutionError as exc:
                     logger.error("Falha ao encaminhar para %s (%s): %s", alvo, destino, exc)
@@ -443,8 +514,10 @@ async def _process_message(log_id: int, instance_name: str):
             row = _lookup_contact(db, log.church_id, from_number)
             try:
                 if row:
-                    row.name = new_name[:160]
-                    if new_role:
+                    # Cadastro oficial tem prioridade: só preenche campos VAZIOS.
+                    if not (row.name or "").strip():
+                        row.name = new_name[:160]
+                    if new_role and not (row.role or "").strip():
                         row.role = new_role[:80]
                 else:
                     db.add(
@@ -484,6 +557,52 @@ async def _process_message(log_id: int, instance_name: str):
                 db.commit()
             except Exception:
                 db.rollback()
+
+        # ---- memória automática: guarda só o que for útil para o futuro ----
+        intent = result.get("intent", "")
+        note = result.get("memory_note", "")
+        pendency = result.get("new_pendency", "")
+        ctype = result.get("contact_type", "")
+        if persistable:
+            updates = []
+            if intent and intent != contact.last_intent:
+                contact.last_intent = intent[:160]
+                updates.append(f"intenção: {intent}")
+            if (
+                ctype
+                and ctype.lower() not in ("desconhecido", "não identificado")
+                and ctype != contact.contact_type
+            ):
+                # Só chega aqui quando a pessoa DECLAROU explicitamente o que é.
+                contact.contact_type = ctype[:40]
+                updates.append(f"tipo: {ctype}")
+            if note:
+                db.add(
+                    ContactMemory(
+                        church_id=log.church_id,
+                        contact_id=contact.id,
+                        kind="fato",
+                        content=note[:500],
+                        source="automatica",
+                    )
+                )
+                updates.append(f"fato: {note}")
+            if pendency:
+                db.add(
+                    ContactMemory(
+                        church_id=log.church_id,
+                        contact_id=contact.id,
+                        kind="pendencia",
+                        content=pendency[:500],
+                        status="aberta",
+                        source="automatica",
+                    )
+                )
+                updates.append(f"pendente: {pendency}")
+            contact.last_talk_at = datetime.utcnow()
+            if updates:
+                _add_step(log, "memória do contato atualizada", detail="; ".join(updates)[:200])
+            db.commit()
 
         matched = next((d for d in departments if d["name"].lower() == department_name.lower()), None)
         matched_dep = None

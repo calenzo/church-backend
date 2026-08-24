@@ -144,6 +144,10 @@ class ContactUpdate(BaseModel):
     name: str | None = None
     phone: str | None = None
     role: str | None = None
+    contact_type: str | None = Field(default=None, max_length=40)
+    department_name: str | None = Field(default=None, max_length=120)
+    resumo_contexto: str | None = None
+    memory_locked: bool | None = None
 
 
 class ContactOut(ContactBase):
@@ -152,6 +156,40 @@ class ContactOut(ContactBase):
     id: int
     church_id: int
     created_at: datetime | None = None
+    contact_type: str = ""
+    department_name: str = ""
+    resumo_contexto: str = ""
+    last_intent: str = ""
+    last_talk_at: datetime | None = None
+    memory_locked: bool = False
+
+
+class MemoryCreate(BaseModel):
+    kind: str = Field(default="observacao", pattern="^(fato|pendencia|observacao)$")
+    content: str = Field(min_length=2)
+    responsible: str = Field(default="", max_length=120)
+    status: str = Field(default="", pattern="^(|aberta|resolvida)$")
+    memory_type: str = Field(default="permanente", pattern="^(temporaria|permanente)$")
+    expires_at: datetime | None = None
+
+
+class MemoryUpdate(BaseModel):
+    content: str | None = None
+    responsible: str | None = Field(default=None, max_length=120)
+    status: str | None = Field(default=None, pattern="^(aberta|resolvida|)$")
+    memory_type: str | None = Field(default=None, pattern="^(temporaria|permanente)$")
+    expires_at: datetime | None = None
+
+
+class MemoryOut(MemoryCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    church_id: int
+    contact_id: int
+    source: str = "manual"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class RoutingRuleBase(BaseModel):

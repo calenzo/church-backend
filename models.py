@@ -111,6 +111,34 @@ class Contact(Base):
     role: Mapped[str] = mapped_column(String(80), default="")  # cargo/função, ex.: Pastor
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # ---- ficha estendida / memória inteligente ----
+    contact_type: Mapped[str] = mapped_column(String(40), default="")  # Membro, Visitante...
+    department_name: Mapped[str] = mapped_column(String(120), default="")
+    resumo_contexto: Mapped[str] = mapped_column(Text, default="")
+    last_intent: Mapped[str] = mapped_column(String(160), default="")
+    last_talk_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    memory_locked: Mapped[bool] = mapped_column(default=False)  # bloqueia escrita automática
+
+
+class ContactMemory(Base):
+    """Memória por contato: fatos úteis, observações e pedidos pendentes.
+    Manual (administrador) tem prioridade sobre automático (IA); nunca sobrescreve cadastro."""
+
+    __tablename__ = "contact_memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="fato")  # fato | pendencia | observacao
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="")  # pendencia: aberta | resolvida
+    responsible: Mapped[str] = mapped_column(String(120), default="")
+    memory_type: Mapped[str] = mapped_column(String(20), default="permanente")  # temporaria|permanente
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="manual")  # automatica | manual
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
 
 class RoutingRule(Base):
     """Regra de encaminhamento automático: assunto/intenção -> responsável (telefone).

@@ -14,7 +14,7 @@ from auth import (
 )
 from config import settings
 from database import get_db
-from models import AuthSession, Church, Contact, Department, LLMConfig, MessageLog, RoutingRule, User, WhatsAppNumber
+from models import AuthSession, Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, User, WhatsAppNumber
 from routers.webhook import get_or_create_config
 from schemas import (
     ChurchCreate,
@@ -29,6 +29,9 @@ from schemas import (
     LoginIn,
     LlmConfigIn,
     LlmConfigOut,
+    MemoryCreate,
+    MemoryOut,
+    MemoryUpdate,
     MessageOut,
     NumberCreate,
     NumberOut,
@@ -370,6 +373,15 @@ def update_contact(
         if clash:
             raise HTTPException(status_code=400, detail="Este número já está cadastrado para esta igreja")
         contact.phone = phone
+    # Ficha/memória: dados manuais do administrador (prioridade máxima)
+    if data.contact_type is not None:
+        contact.contact_type = data.contact_type.strip()
+    if data.department_name is not None:
+        contact.department_name = data.department_name.strip()
+    if data.resumo_contexto is not None:
+        contact.resumo_contexto = data.resumo_contexto.strip()
+    if data.memory_locked is not None:
+        contact.memory_locked = data.memory_locked
     db.commit()
     db.refresh(contact)
     return contact
@@ -383,6 +395,112 @@ def delete_contact(
 ):
     contact = _accessible_contact(db, user, contact_id)
     db.delete(contact)
+    db.commit()
+
+
+# ----------------------------- Memória dos contatos -----------------------------
+# Ficha viva de cada contato: fatos, observações e pendências. Manual > automático.
+
+
+def _accessible_memory(db: Session, user: User, memory_id: int) -> ContactMemory:
+    mem = db.get(ContactMemory, memory_id)
+    if not mem:
+        raise HTTPException(status_code=404, detail="Memória não encontrada")
+    if user.role != "super_admin" and mem.church_id != user.church_id:
+        raise HTTPException(status_code=403, detail="Sem acesso a esta memória")
+    return mem
+
+
+@router.get("/contacts/{contact_id}/memory", response_model=list[MemoryOut])
+def list_contact_memory(
+    contact_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    contact = _accessible_contact(db, user, contact_id)
+    return (
+        db.query(ContactMemory)
+        .filter(ContactMemory.contact_id == contact.id)
+        .order_by(ContactMemory.created_at.desc(), ContactMemory.id.desc())
+        .all()
+    )
+
+
+@router.post("/contacts/{contact_id}/memory", response_model=MemoryOut, status_code=201)
+def create_contact_memory(
+    contact_id: int,
+    data: MemoryCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    contact = _accessible_contact(db, user, contact_id)
+    mem = ContactMemory(
+        church_id=contact.church_id,
+        contact_id=contact.id,
+        kind=data.kind,
+        content=data.content.strip(),
+        responsible=data.responsible.strip(),
+        status="aberta" if data.kind == "pendencia" and not data.status else data.status,
+        memory_type=data.memory_type,
+        expires_at=data.expires_at,
+        source="manual",
+    )
+    db.add(mem)
+    db.commit()
+    db.refresh(mem)
+    return mem
+
+
+@router.put("/memories/{memory_id}", response_model=MemoryOut)
+def update_contact_memory(
+    memory_id: int,
+    data: MemoryUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from datetime import datetime as _dt
+
+    mem = _accessible_memory(db, user, memory_id)
+    if data.content is not None:
+        mem.content = data.content.strip()
+    if data.responsible is not None:
+        mem.responsible = data.responsible.strip()
+    if data.status is not None:
+        mem.status = data.status
+    if data.memory_type is not None:
+        mem.memory_type = data.memory_type
+    if data.expires_at is not None:
+        mem.expires_at = data.expires_at
+    mem.updated_at = _dt.utcnow()
+    db.commit()
+    db.refresh(mem)
+    return mem
+
+
+@router.delete("/memories/{memory_id}", status_code=204)
+def delete_contact_memory(
+    memory_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    mem = _accessible_memory(db, user, memory_id)
+    db.delete(mem)
+    db.commit()
+
+
+@router.delete("/contacts/{contact_id}/memory", status_code=204)
+def clear_contact_memory(
+    contact_id: int,
+    scope: str = "automatica",  # automatica | tudo
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    contact = _accessible_contact(db, user, contact_id)
+    query = db.query(ContactMemory).filter(ContactMemory.contact_id == contact.id)
+    if scope != "tudo":
+        query = query.filter(ContactMemory.source == "automatica")
+    for mem in query.all():
+        db.delete(mem)
     db.commit()
 
 

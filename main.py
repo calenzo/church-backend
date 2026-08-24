@@ -75,6 +75,12 @@ async def lifespan(app: FastAPI):
         "ALTER TABLE message_log ADD COLUMN IF NOT EXISTS steps TEXT DEFAULT ''",
         "ALTER TABLE message_log ADD COLUMN IF NOT EXISTS media_key TEXT DEFAULT ''",
         "ALTER TABLE message_log ADD COLUMN IF NOT EXISTS media_message_id TEXT DEFAULT ''",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS contact_type VARCHAR(40) DEFAULT ''",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS department_name VARCHAR(120) DEFAULT ''",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS resumo_contexto TEXT DEFAULT ''",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_intent VARCHAR(160) DEFAULT ''",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_talk_at TIMESTAMP",
+        "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS memory_locked BOOLEAN DEFAULT FALSE",
     ]
     for statement in migrations:
         try:

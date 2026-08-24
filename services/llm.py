@@ -63,14 +63,22 @@ horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento
 - Várias mensagens seguidas sobre o mesmo assunto são UMA solicitação só; se ela complementa a pergunta anterior ("Você sabe?", "É essa semana?"), não encaminhe de novo.
 - Ao decidir encaminhar, escreva em reply a resposta natural para o remetente SEM afirmar que encaminhou e SEM prometer retorno ("vou te responder depois", "aguarde confirmação" etc.): quem confirma o envio é o sistema, depois que ele realmente acontecer. Diga algo como "Não tenho essa informação cadastrada no momento; vou verificar com a Secretaria para você." quando for o caso.
 
+8. MEMÓRIA DO CONTATO (usar com discrição):
+- O bloco "Memória do contato" traz o cadastro relevante, pendências abertas e fatos recentes daquele número. Use-o para dar CONTINUIDADE à conversa: se a pessoa perguntar algo vago ("já conseguiu saber?", "e aí?", "deu certo?"), relacione com a pendência/assunto mais recente que combinar — nunca responda "saber o quê?".
+- NÃO mencione pendências antigas sem relação com a conversa atual. NÃO cite estatísticas nem exponha a memória de forma invasiva (nada de "tenho registrado que você falou 3 vezes com o Pastor"); use a informação discretamente e naturalmente.
+- O CADASTRO OFICIAL é prioridade máxima: nunca contradiga nem "corrija" nome, função ou departamento já cadastrados com base em inferências.
+- NUNCA invente informação para completar memória. Se não souber, não registre nada.
+- Preencha os campos opcionais do JSON quando fizer sentido: "intent" (intenção resumida desta mensagem, ex.: "perguntar escala da limpeza"), "memory_note" (fato ÚTIL para conversas futuras, curto; omita se nada for útil), "new_pendency" (pedido que ficou aguardando alguém responder, ex.: "escala da limpeza - aguardando Secretaria"; só quando realmente ficar pendente), "contact_type" (APENAS se a pessoa declarar explicitamente o que é: "sou visitante", "sou novo convertido", "sou membro" -> Membro/Visitante/Novo convertido/Liderança/Prestador de serviço/Contato externo). Nos demais casos deixe "".
+
 Regras operacionais:
 - A mensagem do usuário traz a DATA E HORA atuais no Brasil. Use-as para entender palavras como "hoje", "amanhã" e "próximo". Nunca invente datas ou horários.
 - Responda de maneira curta (máx. 3 frases), em português.
 
 Responda SEMPRE apenas com JSON válido no formato:
-{"department": "<nome do departamento>", "reply": "<sua resposta>", "forward_rule_id": ""}
+{"department": "<nome do departamento>", "reply": "<sua resposta>", "forward_rule_id": "", "intent": "", "memory_note": "", "new_pendency": "", "contact_type": ""}
 
 forward_rule_id: deixe "" na maioria das vezes; preencha com o número da regra (ex.: "3") APENAS quando decidir encaminhar conforme a seção 7.
+intent/memory_note/new_pendency/contact_type: opcionais conforme a seção 8; deixe "" quando não houver nada útil.
 
 Se nenhum departamento corresponder, use exatamente "geral".
 """
@@ -226,6 +234,7 @@ async def classify_and_reply(
     asked_name_before: bool = False,
     known_names: list[str] | None = None,
     routing_rules: list[dict] | None = None,
+    memory_text: str | None = None,
 ) -> dict:
     """Envia a mensagem para a LLM e retorna {"department", "reply", ...}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
@@ -250,7 +259,8 @@ async def classify_and_reply(
         f"Departamentos disponíveis:\n{departments_block}\n"
         f"{build_routing_rules_block(routing_rules)}\n"
         f"{build_sender_block(sender, asked_name_before, known_names)}\n"
-        f"{build_history_block(history)}\n\n"
+        f"{build_history_block(history)}\n"
+        f"{memory_text or ''}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )
     if not history:
@@ -293,6 +303,10 @@ async def classify_and_reply(
         "new_contact_name": str(result.get("new_contact_name", "")).strip(),
         "new_contact_role": str(result.get("new_contact_role", "")).strip(),
         "forward_rule_id": str(result.get("forward_rule_id", "") or "").strip(),
+        "intent": str(result.get("intent", "")).strip()[:160],
+        "memory_note": str(result.get("memory_note", "")).strip(),
+        "new_pendency": str(result.get("new_pendency", "")).strip(),
+        "contact_type": str(result.get("contact_type", "")).strip()[:40],
     }
 
 

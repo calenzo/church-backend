@@ -154,6 +154,34 @@ class ContactOut(ContactBase):
     created_at: datetime | None = None
 
 
+class RoutingRuleBase(BaseModel):
+    topic: str = Field(min_length=2, max_length=160, description="Assunto/intenção, ex.: Escala da limpeza")
+    responsible: str = Field(default="", max_length=160, description="Setor responsável, ex.: Secretaria")
+    phone: str = Field(min_length=10, max_length=30, description="Telefone do responsável com DDD")
+    department_name: str = Field(default="", max_length=120)
+    active: bool = True
+
+
+class RoutingRuleCreate(RoutingRuleBase):
+    pass
+
+
+class RoutingRuleUpdate(BaseModel):
+    topic: str | None = None
+    responsible: str | None = None
+    phone: str | None = None
+    department_name: str | None = None
+    active: bool | None = None
+
+
+class RoutingRuleOut(RoutingRuleBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    church_id: int
+    created_at: datetime | None = None
+
+
 class NumberCreate(BaseModel):
     label: str = ""
     instance_name: str | None = Field(

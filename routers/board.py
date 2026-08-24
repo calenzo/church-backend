@@ -14,7 +14,7 @@ from auth import (
 )
 from config import settings
 from database import get_db
-from models import AuthSession, Church, Contact, Department, LLMConfig, MessageLog, User, WhatsAppNumber
+from models import AuthSession, Church, Contact, Department, LLMConfig, MessageLog, RoutingRule, User, WhatsAppNumber
 from routers.webhook import get_or_create_config
 from schemas import (
     ChurchCreate,
@@ -34,6 +34,9 @@ from schemas import (
     NumberOut,
     NumberUpdate,
     PairingCodeIn,
+    RoutingRuleCreate,
+    RoutingRuleOut,
+    RoutingRuleUpdate,
     ServiceStatus,
     TestSendIn,
     TokenOut,
@@ -380,6 +383,93 @@ def delete_contact(
 ):
     contact = _accessible_contact(db, user, contact_id)
     db.delete(contact)
+    db.commit()
+
+
+# ----------------------------- Regras de encaminhamento -----------------------------
+# O usuário cadastra apenas ASSUNTO -> RESPONSÁVEL -> TELEFONE; a IA decide
+# automaticamente quando encaminhar, sem opções manuais no painel.
+
+
+def _accessible_routing_rule(db: Session, user: User, rule_id: int) -> RoutingRule:
+    rule = db.get(RoutingRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Regra não encontrada")
+    if user.role != "super_admin" and rule.church_id != user.church_id:
+        raise HTTPException(status_code=403, detail="Sem acesso a esta regra")
+    return rule
+
+
+@router.get("/churches/{church_id}/routing-rules", response_model=list[RoutingRuleOut])
+def list_routing_rules(
+    church_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _resolve_church(db, user, church_id)
+    return (
+        db.query(RoutingRule)
+        .filter(RoutingRule.church_id == church_id)
+        .order_by(RoutingRule.topic)
+        .all()
+    )
+
+
+@router.post(
+    "/churches/{church_id}/routing-rules", response_model=RoutingRuleOut, status_code=201
+)
+def create_routing_rule(
+    church_id: int,
+    data: RoutingRuleCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    church = _resolve_church(db, user, church_id)
+    rule = RoutingRule(
+        church_id=church.id,
+        topic=data.topic.strip(),
+        responsible=data.responsible.strip(),
+        phone=_normalize_phone(data.phone),
+        department_name=data.department_name.strip(),
+        active=data.active,
+    )
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.put("/routing-rules/{rule_id}", response_model=RoutingRuleOut)
+def update_routing_rule(
+    rule_id: int,
+    data: RoutingRuleUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rule = _accessible_routing_rule(db, user, rule_id)
+    if data.topic is not None:
+        rule.topic = data.topic.strip()
+    if data.responsible is not None:
+        rule.responsible = data.responsible.strip()
+    if data.phone is not None:
+        rule.phone = _normalize_phone(data.phone)
+    if data.department_name is not None:
+        rule.department_name = data.department_name.strip()
+    if data.active is not None:
+        rule.active = data.active
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.delete("/routing-rules/{rule_id}", status_code=204)
+def delete_routing_rule(
+    rule_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rule = _accessible_routing_rule(db, user, rule_id)
+    db.delete(rule)
     db.commit()
 
 

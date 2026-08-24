@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal, get_db
-from models import Church, Contact, Department, LLMConfig, MessageLog, WhatsAppNumber
+from models import Church, Contact, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,31 @@ _lid_map: dict[str, str] = {}
 # Nome informado pelo próprio remetente quando o número ainda não foi resolvido
 # (LID sem pareamento): vale enquanto o processo estiver de pé.
 _lid_name_map: dict[str, dict[str, str]] = {}
+
+# Proteção contra duplicidade: (church_id, numero, regra) -> último envio.
+# Várias mensagens seguidas sobre o mesmo assunto geram UM encaminhamento só.
+_forward_recently: dict[tuple, datetime] = {}
+_FORWARD_WINDOW = 600  # segundos
+
+
+def _fmt_phone(digits: str) -> str:
+    """Exibe o telefone no formato brasileiro quando possível."""
+    d = _digits(digits)
+    if len(d) in (12, 13) and d.startswith("55"):
+        d = d[2:]  # remove o DDI 55 para exibir
+    if len(d) == 11:
+        return f"({d[:2]}) {d[2:7]}-{d[7:]}"
+    if len(d) == 10:
+        return f"({d[:2]}) {d[2:6]}-{d[6:]}"
+    return digits
+
+
+def _send_target(phone: str) -> str:
+    """Garante DDI 55 no destino do encaminhamento."""
+    d = _digits(phone)
+    if d and len(d) in (10, 11):
+        return "55" + d
+    return d
 
 
 def _remember_lid(key: dict) -> None:
@@ -269,6 +294,18 @@ async def _process_message(log_id: int, instance_name: str):
         from_number = log.from_number
         media_key = log.media_key or None
 
+        # Regras de encaminhamento ativas: assunto -> responsável. A IA decide
+        # automaticamente quando usar (sem opções manuais no painel).
+        rules_rows = (
+            db.query(RoutingRule)
+            .filter(RoutingRule.church_id == log.church_id, RoutingRule.active == True)  # noqa: E712
+            .all()
+        )
+        routing_rules = [
+            {"id": r.id, "topic": r.topic, "responsible": r.responsible} for r in rules_rows
+        ]
+        rules_map = {str(r.id): r for r in rules_rows}
+
         # Mensagem de grupo: a conversa acontece no grupo de um departamento;
         # restringe o contexto ao(s) departamento(s) daquele grupo e responde nele.
         reply_in_group = bool(log.to_jid and log.to_jid.endswith("@g.us"))
@@ -322,6 +359,7 @@ async def _process_message(log_id: int, instance_name: str):
                 sender=sender,
                 asked_name_before=asked_before,
                 known_names=known_names,
+                routing_rules=routing_rules,
             )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"
@@ -339,6 +377,51 @@ async def _process_message(log_id: int, instance_name: str):
 
         department_name = result["department"]
         reply = result["reply"]
+
+        # Encaminhamento automático: a IA apontou uma regra; o sistema executa
+        # e só confirma ao remetente se o envio realmente aconteceu.
+        rule = rules_map.get(str(result.get("forward_rule_id") or ""))
+        if rule:
+            alvo = rule.responsible.strip() or "o responsável pelo assunto"
+            if known and contact:
+                remetente = contact.name + (f" ({contact.role})" if contact.role else "")
+            else:
+                remetente = "número não identificado"
+            dedup_key = (log.church_id, from_number, rule.id)
+            last_sent = _forward_recently.get(dedup_key)
+            if (
+                last_sent
+                and (datetime.utcnow() - last_sent).total_seconds() < _FORWARD_WINDOW
+            ):
+                # Mesma solicitação em sequência: não notifica o responsável de novo.
+                reply = f'Sua solicitação sobre "{rule.topic}" já foi encaminhada para {alvo}.'
+                _add_step(log, "encaminhamento repetido ignorado", status="warn", detail=alvo)
+                db.commit()
+            else:
+                destino = _send_target(rule.phone)
+                notificacao = (
+                    f"Nova solicitação — {rule.topic}\n"
+                    f"Remetente: {remetente}\n"
+                    f"Telefone: {_fmt_phone(from_number)}\n"
+                    f'Mensagem: "{text[:500]}"'
+                )
+                try:
+                    await evolution.send_text(destino, notificacao, instance=instance_name)
+                    _forward_recently[dedup_key] = datetime.utcnow()
+                    reply = f"Sua mensagem foi encaminhada para {alvo}."
+                    _add_step(log, "encaminhado para o responsável", detail=f"{alvo} ({destino})")
+                    db.commit()
+                except evolution.EvolutionError as exc:
+                    logger.error("Falha ao encaminhar para %s (%s): %s", alvo, destino, exc)
+                    reply = (
+                        f"Não consegui encaminhar sua mensagem para {alvo} agora. "
+                        "Tente novamente mais tarde."
+                    )
+                    log.status = "routed_with_error"
+                    _add_step(
+                        log, "falha ao encaminhar ao responsável", status="error", detail=str(exc)
+                    )
+                    db.commit()
 
         # Cadastro automático: nome dito pelo remetente (LLM) ou extraído da frase.
         new_name = (result.get("new_contact_name") or "").strip()
@@ -410,7 +493,8 @@ async def _process_message(log_id: int, instance_name: str):
         log.department_name = department_name
         log.department_id = matched_dep.id if matched_dep else None
         log.llm_reply = reply
-        log.status = "routed"
+        # Preserva o status de erro caso o encaminhamento ao responsável tenha falhado.
+        log.status = log.status if log.status == "routed_with_error" else "routed"
         _add_step(log, "classificado", detail=f"departamento: {department_name}")
         db.commit()
 

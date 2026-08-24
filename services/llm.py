@@ -53,12 +53,23 @@ horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento
 - Nos demais casos, omita new_contact_name/new_contact_role (ou deixe "").
 - Depois que o nome estiver salvo no cadastro, trate a pessoa pelo nome normalmente.
 
+7. ENCAMINHAMENTO AUTOMÁTICO POR ASSUNTO (decisão 100% sua, sem perguntar ao usuário):
+- O bloco "Regras de encaminhamento" lista assuntos com responsável cadastrado (formato [regra N] Assunto -> Responsável).
+- Reconheça a INTENÇÃO pelo significado, não por palavras exatas: "Quem vai limpar a igreja?", "Quem ficou responsável pela limpeza?" e "Qual a escala da limpeza?" são TODAS o assunto "Escala da limpeza".
+- ENCaminhe (preenchendo forward_rule_id) somente quando: (a) faltar informação confiável/cadastrada para responder E existir regra do assunto; OU (b) o pedido claramente exigir ação humana ou um setor específico (falar com a Secretaria, marcar visita pastoral, alterar cadastro, assunto financeiro, batismo); OU (c) a pessoa pedir diretamente um setor/responsável que tenha regra.
+- NÃO encaminhe o que você consegue resolver com a informação cadastrada ou o histórico (horário do culto, endereço, respostas simples): responda normalmente e deixe forward_rule_id vazio.
+- NÃO transforme conversa comum em encaminhamento: saudações, avisos, pedidos de oração e comentários não geram encaminhamento sem pedido claro.
+- Várias mensagens seguidas sobre o mesmo assunto são UMA solicitação só; se ela complementa a pergunta anterior ("Você sabe?", "É essa semana?"), não encaminhe de novo.
+- Ao decidir encaminhar, escreva em reply a resposta natural para o remetente SEM afirmar que encaminhou e SEM prometer retorno ("vou te responder depois", "aguarde confirmação" etc.): quem confirma o envio é o sistema, depois que ele realmente acontecer. Diga algo como "Não tenho essa informação cadastrada no momento; vou verificar com a Secretaria para você." quando for o caso.
+
 Regras operacionais:
 - A mensagem do usuário traz a DATA E HORA atuais no Brasil. Use-as para entender palavras como "hoje", "amanhã" e "próximo". Nunca invente datas ou horários.
 - Responda de maneira curta (máx. 3 frases), em português.
 
 Responda SEMPRE apenas com JSON válido no formato:
-{"department": "<nome do departamento>", "reply": "<sua resposta>"}
+{"department": "<nome do departamento>", "reply": "<sua resposta>", "forward_rule_id": ""}
+
+forward_rule_id: deixe "" na maioria das vezes; preencha com o número da regra (ex.: "3") APENAS quando decidir encaminhar conforme a seção 7.
 
 Se nenhum departamento corresponder, use exatamente "geral".
 """
@@ -174,6 +185,22 @@ def build_sender_block(
     return f"\n\nIdentidade do remetente:\n{ident}"
 
 
+def build_routing_rules_block(routing_rules):
+    """Bloco com as regras de encaminhamento (assunto -> responsável) para a IA decidir."""
+    if not routing_rules:
+        return "\n\nRegras de encaminhamento disponíveis:\n- Nenhuma."
+    lines = []
+    for rule in routing_rules:
+        topic = (rule.get("topic") or "").strip()
+        responsible = (rule.get("responsible") or "").strip() or "responsável"
+        lines.append(f"- [regra {rule.get('id')}] {topic} -> {responsible}")
+    return (
+        "\n\nRegras de encaminhamento disponíveis:\n" + "\n".join(lines)
+        + "\nUse forward_rule_id apenas quando faltar informação e existir regra do assunto,"
+        " ou quando o pedido exigir claramente ação humana/setor específico."
+    )
+
+
 def build_history_block(history: list[dict] | None) -> str:
     """Monta o bloco de histórico da conversa (mais antiga -> mais recente)."""
     if not history:
@@ -197,13 +224,15 @@ async def classify_and_reply(
     sender: dict | None = None,
     asked_name_before: bool = False,
     known_names: list[str] | None = None,
+    routing_rules: list[dict] | None = None,
 ) -> dict:
     """Envia a mensagem para a LLM e retorna {"department", "reply", ...}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
     anteriores deste contato, da mais antiga para a mais recente.
     `sender` é {"name", "role"} quando o número está na base de contatos da igreja.
     `asked_name_before` indica que já convidamos este número a se identificar.
-    `known_names` são os nomes já cadastrados na igreja (para desambiguar nomes iguais)."""
+    `known_names` são os nomes já cadastrados na igreja (para desambiguar nomes iguais).
+    `routing_rules` são as regras de encaminhamento (assunto -> responsável) ativas."""
     departments_block = build_departments_block(departments)
     # As regras de comportamento valem SEMPRE; o texto personalizado da igreja
     # entra como complemento, nunca substituindo as regras fundamentais.
@@ -218,6 +247,7 @@ async def classify_and_reply(
     user_prompt = (
         f"Data e hora atuais no Brasil: {_now_brasilia()}.\n\n"
         f"Departamentos disponíveis:\n{departments_block}\n"
+        f"{build_routing_rules_block(routing_rules)}\n"
         f"{build_sender_block(sender, asked_name_before, known_names)}\n"
         f"{build_history_block(history)}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
@@ -261,6 +291,7 @@ async def classify_and_reply(
         "reply": str(result.get("reply", "")).strip(),
         "new_contact_name": str(result.get("new_contact_name", "")).strip(),
         "new_contact_role": str(result.get("new_contact_role", "")).strip(),
+        "forward_rule_id": str(result.get("forward_rule_id", "") or "").strip(),
     }
 
 

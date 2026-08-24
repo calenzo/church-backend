@@ -112,6 +112,22 @@ class Contact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class RoutingRule(Base):
+    """Regra de encaminhamento automático: assunto/intenção -> responsável (telefone).
+    A IA decide quando usá-la; o usuário só cadastra o destino uma vez."""
+
+    __tablename__ = "routing_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    topic: Mapped[str] = mapped_column(String(160))  # assunto/intenção, ex.: "Escala da limpeza"
+    responsible: Mapped[str] = mapped_column(String(160), default="")  # setor/nome, ex.: Secretaria
+    phone: Mapped[str] = mapped_column(String(40), default="")  # telefone do responsável (dígitos)
+    department_name: Mapped[str] = mapped_column(String(120), default="")
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class MessageLog(Base):
     """Log de todas as mensagens processadas."""
 

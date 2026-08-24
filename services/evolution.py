@@ -181,6 +181,12 @@ async def create_instance(instance: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(url, json=payload, headers=_headers())
+            if resp.status_code == 403 and "already in use" in resp.text.lower():
+                # Registro orfao da instancia ainda existe na Evolution;
+                # apaga e tenta criar de novo uma unica vez.
+                logger.warning("Instancia '%s' ja existe na Evolution; apagando para recriar", instance)
+                await delete_instance(instance)
+                resp = await client.post(url, json=payload, headers=_headers())
     except httpx.HTTPError as exc:
         raise EvolutionError(f"Falha ao comunicar com a Evolution API: {exc}") from exc
     if resp.status_code not in (200, 201):
@@ -193,11 +199,11 @@ async def create_instance(instance: str) -> None:
 
 async def _connect_raw(number: str | None = None, instance: str | None = None) -> dict:
     inst = instance or settings.evolution_instance
-    suffix = f"/{number}" if number else ""
-    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{inst}{suffix}"
+    url = f"{settings.evolution_base_url.rstrip('/')}/instance/connect/{inst}"
+    params = {"number": number} if number else None
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers=_headers())
+            resp = await client.get(url, params=params, headers=_headers())
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:

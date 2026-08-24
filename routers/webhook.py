@@ -12,6 +12,7 @@ from config import settings
 from database import SessionLocal, get_db
 from models import Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
+from services.phone import canonical as canonical_phone, only_digits, variants as phone_variants
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def _normalize_jid(jid: str) -> str:
 
 
 def _digits(phone: str) -> str:
-    return re.sub(r"\D", "", phone or "")
+    return only_digits(phone)
 
 
 # Mapeamento aprendido em tempo real: JID @lid -> número real (só dígitos).
@@ -216,15 +217,14 @@ def _sender_phone(data: dict, key: dict, is_group: bool) -> str:
 
 def _lookup_contact(db: Session, church_id: int | None, phone: str) -> Contact | None:
     """Encontra o contato cadastrado pelo número do remetente (só dígitos).
-    Tolerante ao DDI 55: cadastro '219999069940' casa com JID '55219999069940'.
+    Aceita qualquer formatação: '219999069940', '55219999069940', '+55 21 99906-9940'
+    e afins apontam para o MESMO cadastro (normalização central em services/phone).
     Prefere contatos com nome; linhas em branco (marcadores) ficam por último.
     Para LIDs ainda não pareados, usa o nome que o próprio remetente informou."""
     digits = _digits(phone)
     if not digits or not church_id:
         return None
-    candidates = [digits]
-    if digits.startswith("55") and len(digits) >= 12:
-        candidates.append(digits[2:])
+    candidates = phone_variants(digits)
     rows = (
         db.query(Contact)
         .filter(Contact.church_id == church_id, Contact.phone.in_(candidates))
@@ -252,6 +252,13 @@ _SELF_NAME_RE = re.compile(
     r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ']*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ']+){0,3})",
     re.IGNORECASE,
 )
+# Apresentação sem artigo: "sou Jennifer", "aqui é Jennifer" (nome começa com maiúscula).
+_SELF_NAME_BARE_RE = re.compile(
+    r"(?:^|[^\wÀ-ÿ])(?:sou|aqui (?:é|e))\s+"
+    r"([A-ZÀ-Þ][\wÀ-ÿ']*(?:\s+[A-Za-zÀ-ÿ][\wÀ-ÿ']*){0,3})"
+)
+_NAME_PARTICLES = {"de", "da", "do", "das", "dos", "e"}
+_NAME_NOT_NAMES = {"eu", "mim", "nos", "nós", "ele", "ela", "nada", "ninguem", "ninguém"}
 _ROLE_WORDS = {
     "irmã", "irma", "irmão", "irmao", "missionária", "missionaria", "diaconisa",
     "diácono", "diacono", "presbítero", "presbitero", "evangelista",
@@ -259,13 +266,33 @@ _ROLE_WORDS = {
 }
 
 
+def _clean_name_words(words: list[str]) -> str:
+    """Mantém palavras que parecem nome (iniciais maiúsculas/partículas) e
+    descarta o resto ('da limpeza', 'aqui' etc.), sem inventar dados."""
+    kept: list[str] = []
+    for word in words:
+        low = word.lower()
+        if not kept or low in _NAME_PARTICLES or word[:1].isupper():
+            kept.append(word)
+        else:
+            break
+    while kept and kept[-1].lower() in _NAME_PARTICLES:
+        kept.pop()
+    return " ".join(kept)
+
+
 def _extract_self_name(text: str) -> tuple[str, str]:
     """Extrai (nome, cargo) de frases de apresentação, sem depender da LLM."""
     match = _SELF_NAME_RE.search(text or "")
-    if not match:
-        return "", ""
-    words = match.group(1).strip().strip("!,.?;:").split()
     role = ""
+    if match:
+        raw = match.group(1)
+    else:
+        match = _SELF_NAME_BARE_RE.search(text or "")
+        if not match:
+            return "", ""
+        raw = _clean_name_words(match.group(1).strip().strip("!,.?;:").split())
+    words = raw.strip().strip("!,.?;:").split()
     name_words = []
     for word in words:
         clean = word.strip(".,")
@@ -274,9 +301,48 @@ def _extract_self_name(text: str) -> tuple[str, str]:
         else:
             name_words.append(clean)
     name = " ".join(name_words)
-    if not (2 <= len(name) <= 60) or not re.search(r"[A-Za-zÀ-ÿ]", name):
+    if (
+        not (2 <= len(name) <= 60)
+        or not re.search(r"[A-Za-zÀ-ÿ]", name)
+        or name.lower() in _NAME_NOT_NAMES
+    ):
         return "", ""
     return name, role
+
+
+def apply_self_registration(
+    db: Session, church_id: int | None, phone: str, name: str, role: str
+) -> str:
+    """Cadastra (ou completa) o contato a partir do que o próprio remetente disse.
+    O CADASTRO OFICIAL tem prioridade: só preenche campos VAZIOS — nunca altera
+    nome/função já registrados. Telefone é normalizado antes de salvar/consultar,
+    então '+55 21 97388-6107' e '21973886107' não geram duplicidade.
+    Retorna 'criado', 'atualizado' ou '' (nada mudou / falha de banco)."""
+    if not (church_id and name and re.search(r"[A-Za-zÀ-ÿ]", name)):
+        return ""
+    row = _lookup_contact(db, church_id, phone)
+    try:
+        if row:
+            changed = False
+            if not (row.name or "").strip():
+                row.name = name[:160]
+                changed = True
+            if role and not (row.role or "").strip():
+                row.role = role[:80]
+                changed = True
+            if changed:
+                db.commit()
+                return "atualizado"
+            return ""
+        store = canonical_phone(phone) or only_digits(phone)
+        if not store:
+            return ""
+        db.add(Contact(church_id=church_id, phone=store[:20], name=name[:160], role=role[:80]))
+        db.commit()
+        return "criado"
+    except Exception:
+        db.rollback()  # duplicado ou outro erro de banco não derruba o fluxo
+        return ""
 
 
 def _add_step(log: MessageLog, step: str, status: str = "ok", detail: str = ""):
@@ -504,39 +570,17 @@ async def _process_message(log_id: int, instance_name: str):
         phone_ok = bool(
             log.church_id and from_number.isdigit() and 10 <= len(from_number) <= 13
         )  # telefones reais; LIDs têm ~15+ dígitos
-        phone_store = (
-            from_number[2:]
-            if from_number.startswith("55") and 12 <= len(from_number) <= 13
-            else from_number
-        )
 
-        if new_name and phone_ok and re.search(r"[A-Za-zÀ-ÿ]", new_name):
-            row = _lookup_contact(db, log.church_id, from_number)
-            try:
-                if row:
-                    # Cadastro oficial tem prioridade: só preenche campos VAZIOS.
-                    if not (row.name or "").strip():
-                        row.name = new_name[:160]
-                    if new_role and not (row.role or "").strip():
-                        row.role = new_role[:80]
-                else:
-                    db.add(
-                        Contact(
-                            church_id=log.church_id,
-                            phone=phone_store,
-                            name=new_name[:160],
-                            role=new_role[:80],
-                        )
-                    )
-                db.commit()
+        if new_name and phone_ok:
+            outcome = apply_self_registration(db, log.church_id, from_number, new_name, new_role)
+            if outcome:
+                # Telefone é normalizado dentro do helper: sem duplicidade de formato.
                 _add_step(
                     log,
                     "contato salvo pelo whatsapp",
                     detail=f"{new_name}" + (f" ({new_role})" if new_role else ""),
                 )
                 db.commit()
-            except Exception:
-                db.rollback()  # duplicado ou outro erro de banco não derruba o fluxo
 
         elif new_name and from_number.isdigit() and re.search(r"[A-Za-zÀ-ÿ]", new_name):
             # LID ainda sem telefone resolvido: memoriza o nome em memória e
@@ -553,7 +597,14 @@ async def _process_message(log_id: int, instance_name: str):
             # Sem nome capturado: registra como "já convidado a se identificar"
             # (linha com nome em branco), para a IA NÃO perguntar o nome toda hora.
             try:
-                db.add(Contact(church_id=log.church_id, phone=phone_store, name="", role=""))
+                db.add(
+                    Contact(
+                        church_id=log.church_id,
+                        phone=canonical_phone(from_number)[:20],
+                        name="",
+                        role="",
+                    )
+                )
                 db.commit()
             except Exception:
                 db.rollback()

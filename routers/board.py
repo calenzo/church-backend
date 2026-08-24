@@ -49,6 +49,7 @@ from schemas import (
 from services import evolution, llm
 from services.evolution import EvolutionError
 from services.llm import LlmError
+from services.phone import canonical as canonical_phone, variants as phone_variants
 
 router = APIRouter(prefix="/api", tags=["board"])
 
@@ -295,10 +296,23 @@ def delete_user(
 
 
 def _normalize_phone(phone: str) -> str:
-    digits = re.sub(r"\D", "", phone or "")
+    """Normaliza para o formato canônico (só dígitos, sem DDI 55 em números BR).
+    '21 97388-6107', '21973886107' e '+55 21 97388-6107' viram o MESMO valor."""
+    digits = canonical_phone(phone)
     if len(digits) < 10 or len(digits) > 15:
         raise HTTPException(status_code=400, detail="Número inválido. Use o formato (21) 99906-9940 ou 5521999069940")
     return digits
+
+
+def _phone_clash(db: Session, church_id: int | None, phone: str, exclude_id: int | None = None):
+    """Procura contato já cadastrado com QUALQUER formatação equivalente do número."""
+    query = (
+        db.query(Contact)
+        .filter(Contact.church_id == church_id, Contact.phone.in_(phone_variants(phone)))
+    )
+    if exclude_id is not None:
+        query = query.filter(Contact.id != exclude_id)
+    return query.first()
 
 
 def _accessible_contact(db: Session, user: User, contact_id: int) -> Contact:
@@ -336,8 +350,7 @@ def create_contact(
 ):
     church = _resolve_church(db, user, church_id)
     phone = _normalize_phone(data.phone)
-    existing = db.query(Contact).filter(Contact.church_id == church.id, Contact.phone == phone).first()
-    if existing:
+    if _phone_clash(db, church.id, phone):
         raise HTTPException(status_code=400, detail="Este número já está cadastrado para esta igreja")
     contact = Contact(
         church_id=church.id,
@@ -365,12 +378,7 @@ def update_contact(
         contact.role = data.role.strip()
     if data.phone is not None:
         phone = _normalize_phone(data.phone)
-        clash = (
-            db.query(Contact)
-            .filter(Contact.church_id == contact.church_id, Contact.phone == phone, Contact.id != contact.id)
-            .first()
-        )
-        if clash:
+        if _phone_clash(db, contact.church_id, phone, exclude_id=contact.id):
             raise HTTPException(status_code=400, detail="Este número já está cadastrado para esta igreja")
         contact.phone = phone
     # Ficha/memória: dados manuais do administrador (prioridade máxima)

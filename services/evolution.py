@@ -215,16 +215,18 @@ async def _connect_with_autocreate(number: str | None = None, instance: str | No
         return await _connect_raw(number, instance)
 
 
-async def logout_instance(instance: str | None = None) -> dict:
+async def logout_instance(instance: str | None = None, force: bool = False) -> dict:
     """Faz logout da instância para desconectar o WhatsApp e limpar credenciais salvas.
-    Necessário para que o pairing code funcione (a instância não pode estar 'registered')."""
+    Necessário para que o pairing code funcione (a instância não pode estar 'registered').
+    Com force=True, faz o logout mesmo com estado 'close'/'connecting', pois a instância
+    pode continuar registrada (credenciais salvas impedem o pairing code)."""
     inst = instance or settings.evolution_instance
     try:
         state = await ping(inst)
     except EvolutionError:
         state = None
 
-    if state is not None and state != "open":
+    if not force and state is not None and state != "open":
         return {"disconnected": False, "already_disconnected": True}
 
     url = f"{settings.evolution_base_url.rstrip('/')}/instance/logout/{inst}"
@@ -290,21 +292,31 @@ async def get_pairing_code(number: str, instance: str | None = None) -> dict:
         return {"connected": True}
 
     try:
-        await logout_instance(inst)
+        await logout_instance(inst, force=True)
     except EvolutionError as exc:
         logger.warning("Falha ao limpar credenciais antes do pairing code: %s", exc)
     await asyncio.sleep(3)
 
-    data = await _connect_with_autocreate(number, inst)
-    pairing = data.get("pairingCode")
-    base64_qr = data.get("base64")
-
-    print('data ::', data)
-    if pairing:
-        return {"pairingCode": pairing}
+    base64_qr: str | None = None
+    last_error: EvolutionError | None = None
+    for attempt in range(2):
+        data = await _connect_with_autocreate(number, inst)
+        pairing = data.get("pairingCode")
+        if pairing:
+            return {"pairingCode": pairing}
+        qrobj = data.get("qrcode") or data
+        candidate = qrobj.get("base64") if isinstance(qrobj, dict) else None
+        if candidate:
+            base64_qr = candidate
+        last_error = EvolutionError(
+            f"Resposta da API não contém pairingCode nem qrcode (tentativa {attempt + 1}/2)"
+        )
+        logger.warning("%s", last_error)
+        if attempt < 1:
+            await asyncio.sleep(3)
     if base64_qr:
         return {"pairingCode": None, "qrcode": base64_qr}
-    raise EvolutionError("Resposta da API não contém pairingCode nem qrcode")
+    raise last_error
 
 
 async def get_media_base64(message_id: str, remote_jid: str = "", from_me: bool = False, convert_to_mp4: bool = False, instance: str | None = None, max_retries: int = 3) -> str | None:

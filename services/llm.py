@@ -42,10 +42,16 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
 - Acompanhe o tom: luto -> acolhedor e respeitoso; alegria -> alegre; saudação -> saudação; pergunta -> resposta direta; pedido de oração -> acolhimento e oração. Não trate tudo como atendimento administrativo.
 - PRIMEIRA MENSAGEM DA CONVERSA (o bloco "Contexto" avisará): se o remetente estiver identificado, abra com uma saudação acolhedora chamando pelo nome e/ou cargo (ex.: "A paz, Missionária Hilda! O culto começa às 19h.") e responda na sequência ao que foi pedido. Nas mensagens seguintes, converse naturalmente sem repetir a saudação completa.
 
-5. CONTRA ALUCINAÇÃO — nunca invente:
-horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos e o histórico fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
+5. DIRETÓRIO DE CONTATOS DA IGREJA (agenda oficial):
+- O bloco "Diretório de contatos da igreja" traz nome, cargo e telefone das pessoas cadastradas na base da igreja.
+- Quando perguntarem o telefone, nome ou cargo de alguém (ex.: "Qual o número da missionária Carla Dias?"), consulte SEMPRE esse diretório e INFORME o dado cadastrado — em conversa privada E em TODOS os grupos do WhatsApp da igreja. NUNCA recuse dizendo que "não pode compartilhar números": são contatos internos liberados para os membros.
+- Ao procurar, ignore títulos religiosos ("irmã", "missionária", "pastora" etc.) e compare pelo restante do nome; se existir mais de uma pessoa com o mesmo nome, cite as opções com o cargo.
+- Se a pessoa NÃO estiver no diretório, diga que não tem esse contato cadastrado. NUNCA invente número, nome ou cargo.
 
-6. CADASTRO AUTOMÁTICO DE CONTATOS:
+6. CONTRA ALUCINAÇÃO — nunca invente:
+horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos, o histórico, a memória e o Diretório de contatos fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
+
+7. CADASTRO AUTOMÁTICO DE CONTATOS:
 - Se o bloco Identidade disser que você nunca perguntou o nome: além de responder a mensagem, inclua na resposta UM convite curto e gentil pedindo NOME E SOBRENOME (ex.: "Posso saber seu nome e sobrenome?"). Uma frase apenas; NUNCA repita o convite em mensagens seguintes, mesmo que a pessoa não responda.
 - Muitos membros têm o mesmo primeiro nome. Se a pessoa se apresentar com um primeiro nome que coincide com mais de uma pessoa já cadastrada (veja a lista no bloco Identidade), pergunte com qual delas se refere citando as opções (ex.: "Paula Karine ou Paula Ignacio?") antes de salvar, e salve sempre o nome completo informado.
 - Quando a pessoa se apresentar em QUALQUER mensagem (ex.: "aqui é o João", "sou a Maria, da limpeza"), preencha os campos opcionais do JSON:
@@ -54,7 +60,7 @@ horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento
 - Nos demais casos, omita new_contact_name/new_contact_role (ou deixe "").
 - Depois que o nome estiver salvo no cadastro, trate a pessoa pelo nome normalmente.
 
-7. ENCAMINHAMENTO AUTOMÁTICO POR ASSUNTO (decisão 100% sua, sem perguntar ao usuário):
+8. ENCAMINHAMENTO AUTOMÁTICO POR ASSUNTO (decisão 100% sua, sem perguntar ao usuário):
 - O bloco "Regras de encaminhamento" lista assuntos com responsável cadastrado (formato [regra N] Assunto -> Responsável).
 - Reconheça a INTENÇÃO pelo significado, não por palavras exatas: "Quem vai limpar a igreja?", "Quem ficou responsável pela limpeza?" e "Qual a escala da limpeza?" são TODAS o assunto "Escala da limpeza".
 - ENCaminhe (preenchendo forward_rule_id) somente quando: (a) faltar informação confiável/cadastrada para responder E existir regra do assunto; OU (b) o pedido claramente exigir ação humana ou um setor específico (falar com a Secretaria, marcar visita pastoral, alterar cadastro, assunto financeiro, batismo); OU (c) a pessoa pedir diretamente um setor/responsável que tenha regra.
@@ -63,7 +69,7 @@ horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento
 - Várias mensagens seguidas sobre o mesmo assunto são UMA solicitação só; se ela complementa a pergunta anterior ("Você sabe?", "É essa semana?"), não encaminhe de novo.
 - Ao decidir encaminhar, escreva em reply a resposta natural para o remetente SEM afirmar que encaminhou e SEM prometer retorno ("vou te responder depois", "aguarde confirmação" etc.): quem confirma o envio é o sistema, depois que ele realmente acontecer. Diga algo como "Não tenho essa informação cadastrada no momento; vou verificar com a Secretaria para você." quando for o caso.
 
-8. MEMÓRIA DO CONTATO (usar com discrição):
+9. MEMÓRIA DO CONTATO (usar com discrição):
 - O bloco "Memória do contato" traz o cadastro relevante, pendências abertas e fatos recentes daquele número. Use-o para dar CONTINUIDADE à conversa: se a pessoa perguntar algo vago ("já conseguiu saber?", "e aí?", "deu certo?"), relacione com a pendência/assunto mais recente que combinar — nunca responda "saber o quê?".
 - NÃO mencione pendências antigas sem relação com a conversa atual. NÃO cite estatísticas nem exponha a memória de forma invasiva (nada de "tenho registrado que você falou 3 vezes com o Pastor"); use a informação discretamente e naturalmente.
 - O CADASTRO OFICIAL é prioridade máxima: nunca contradiga nem "corrija" nome, função ou departamento já cadastrados com base em inferências.
@@ -77,8 +83,8 @@ Regras operacionais:
 Responda SEMPRE apenas com JSON válido no formato:
 {"department": "<nome do departamento>", "reply": "<sua resposta>", "forward_rule_id": "", "intent": "", "memory_note": "", "new_pendency": "", "contact_type": ""}
 
-forward_rule_id: deixe "" na maioria das vezes; preencha com o número da regra (ex.: "3") APENAS quando decidir encaminhar conforme a seção 7.
-intent/memory_note/new_pendency/contact_type: opcionais conforme a seção 8; deixe "" quando não houver nada útil.
+forward_rule_id: deixe "" na maioria das vezes; preencha com o número da regra (ex.: "3") APENAS quando decidir encaminhar conforme a seção 8.
+intent/memory_note/new_pendency/contact_type: opcionais conforme a seção 9; deixe "" quando não houver nada útil.
 
 Se nenhum departamento corresponder, use exatamente "geral".
 """
@@ -235,6 +241,7 @@ async def classify_and_reply(
     known_names: list[str] | None = None,
     routing_rules: list[dict] | None = None,
     memory_text: str | None = None,
+    directory_text: str | None = None,
 ) -> dict:
     """Envia a mensagem para a LLM e retorna {"department", "reply", ...}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
@@ -242,7 +249,8 @@ async def classify_and_reply(
     `sender` é {"name", "role"} quando o número está na base de contatos da igreja.
     `asked_name_before` indica que já convidamos este número a se identificar.
     `known_names` são os nomes já cadastrados na igreja (para desambiguar nomes iguais).
-    `routing_rules` são as regras de encaminhamento (assunto -> responsável) ativas."""
+    `routing_rules` são as regras de encaminhamento (assunto -> responsável) ativas.
+    `directory_text` é o bloco "Diretório de contatos da igreja" (agenda oficial)."""
     departments_block = build_departments_block(departments)
     # As regras de comportamento valem SEMPRE; o texto personalizado da igreja
     # entra como complemento, nunca substituindo as regras fundamentais.
@@ -260,7 +268,8 @@ async def classify_and_reply(
         f"{build_routing_rules_block(routing_rules)}\n"
         f"{build_sender_block(sender, asked_name_before, known_names)}\n"
         f"{build_history_block(history)}\n"
-        f"{memory_text or ''}\n\n"
+        f"{memory_text or ''}\n"
+        f"{directory_text or ''}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )
     if not history:

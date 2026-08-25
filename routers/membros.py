@@ -341,11 +341,22 @@ async def send_test(
     message = f"Teste de lembrete de aniversário — {CHURCH_LABEL}."
     results = []
     for r in recipients:
+        destino = send_target_digits(r.phone)
         try:
-            await send_text(send_target_digits(r.phone), message, instance=instance)
-            results.append({"name": r.name, "phone": r.phone, "ok": True})
+            resp = await send_text(destino, message, instance=instance)
+            # Verifica status na resposta da Evolution API
+            resp_status = (resp or {}).get("status") if isinstance(resp, dict) else None
+            ok = resp_status in (None, "SENT", "DELIVERY_ACK", "DISPLAYED", "READ", True)
+            results.append({
+                "name": r.name,
+                "phone": r.phone,
+                "destino": destino,
+                "ok": ok,
+                "evolution_status": resp_status,
+                "raw": resp if not ok else None,
+            })
         except EvolutionError as exc:
-            results.append({"name": r.name, "phone": r.phone, "ok": False, "error": str(exc)})
+            results.append({"name": r.name, "phone": r.phone, "destino": destino, "ok": False, "error": str(exc)})
     failed = [r for r in results if not r["ok"]]
     return {"sent": len(results) - len(failed), "failed": len(failed), "results": results}
 

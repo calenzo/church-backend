@@ -108,11 +108,26 @@ async def _deliver(db, church: Church, recipients, names: list[str], ref_date: d
             log.error = "WhatsApp desconectado no momento do envio"
             db.commit()
             continue
+        destino = send_target_digits(recipient.phone)
+        logger.info(
+            "Lembrete aniversário: igreja=%s destino=%s (original=%s) instance=%s",
+            church.id, destino, recipient.phone, instance,
+        )
         try:
-            await send_text(send_target_digits(recipient.phone), message, instance=instance)
-            log.status = "enviado"
-            log.error = ""
-            log.sent_at = datetime.utcnow()
+            resp = await send_text(destino, message, instance=instance)
+            # Verifica se a Evolution API retornou erro dentro do body (HTTP 200 mas falha interna)
+            resp_status = (resp or {}).get("status") if isinstance(resp, dict) else None
+            if resp_status and resp_status not in ("SENT", "DELIVERY_ACK", "DISPLAYED", "READ"):
+                log.status = "pendente"
+                log.error = f"Evolution retornou status: {resp_status}"
+                logger.warning(
+                    "Lembrete aniversário: Evolution retornou status inesperado '%s' para %s",
+                    resp_status, recipient.phone,
+                )
+            else:
+                log.status = "enviado"
+                log.error = ""
+                log.sent_at = datetime.now(_TZ)
         except EvolutionError as exc:
             # Não perde o aviso: fica pendente e o próximo ciclo tenta de novo.
             log.status = "pendente"
@@ -156,6 +171,12 @@ async def tick() -> None:
             target = now_sp.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
         except ValueError:
             continue
+        # Log de diagnóstico: mostra horário configurado vs atual
+        logger.debug(
+            "Igreja %s: config=%s alvo=%s agora=%s -> %s",
+            church_id, send_time, target.strftime("%H:%M"), now_sp.strftime("%H:%M"),
+            "processar" if now_sp >= target else "aguardar",
+        )
         # Já passou (ou é) o horário -> garante o envio do dia; o histórico
         # confirma o que já foi enviado, então ciclos/reinícios não duplicam.
         if now_sp >= target:

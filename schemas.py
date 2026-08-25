@@ -11,6 +11,15 @@ class LlmConfigOut(BaseModel):
     api_key: str = ""
     temperature: float
     system_prompt: str = ""
+    process_text: bool = True
+    process_audio: bool = True
+    process_groups: bool = True
+    process_private: bool = True
+    auto_reply: bool = True
+    forward_to_groups: bool = True
+    apply_routing_rules: bool = True
+    auto_register_contacts: bool = True
+    auto_memory: bool = True
     updated_at: datetime | None = None
 
 
@@ -20,6 +29,15 @@ class LlmConfigIn(BaseModel):
     api_key: str = ""
     temperature: float = Field(ge=0.0, le=2.0)
     system_prompt: str = ""
+    process_text: bool = True
+    process_audio: bool = True
+    process_groups: bool = True
+    process_private: bool = True
+    auto_reply: bool = True
+    forward_to_groups: bool = True
+    apply_routing_rules: bool = True
+    auto_register_contacts: bool = True
+    auto_memory: bool = True
 
 
 class DepartmentBase(BaseModel):

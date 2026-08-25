@@ -587,7 +587,7 @@ async def _process_message(log_id: int, instance_name: str):
 
         # Encaminhamento automático: a IA apontou uma regra; o sistema executa
         # e só confirma ao remetente se o envio realmente aconteceu.
-        rule = rules_map.get(str(result.get("forward_rule_id") or ""))
+        rule = rules_map.get(str(result.get("forward_rule_id") or "")) if config.apply_routing_rules else None
         # Escrita automática de memória: exige contato persistido e não bloqueado.
         persistable = bool(
             contact is not None
@@ -653,99 +653,101 @@ async def _process_message(log_id: int, instance_name: str):
                     db.commit()
 
         # Cadastro automático: nome dito pelo remetente (LLM) ou extraído da frase.
-        new_name = (result.get("new_contact_name") or "").strip()
-        new_role = (result.get("new_contact_role") or "").strip()
-        if not new_name and not known:
-            fb_name, fb_role = _extract_self_name(text)
-            if fb_name:
-                new_name, new_role = fb_name, (new_role or fb_role)
-        phone_ok = bool(
-            log.church_id and from_number.isdigit() and 10 <= len(from_number) <= 13
-        )  # telefones reais; LIDs têm ~15+ dígitos
+        if config.auto_register_contacts:
+            new_name = (result.get("new_contact_name") or "").strip()
+            new_role = (result.get("new_contact_role") or "").strip()
+            if not new_name and not known:
+                fb_name, fb_role = _extract_self_name(text)
+                if fb_name:
+                    new_name, new_role = fb_name, (new_role or fb_role)
+            phone_ok = bool(
+                log.church_id and from_number.isdigit() and 10 <= len(from_number) <= 13
+            )  # telefones reais; LIDs têm ~15+ dígitos
 
-        if new_name and phone_ok:
-            outcome = apply_self_registration(db, log.church_id, from_number, new_name, new_role)
-            if outcome:
-                # Telefone é normalizado dentro do helper: sem duplicidade de formato.
+            if new_name and phone_ok:
+                outcome = apply_self_registration(db, log.church_id, from_number, new_name, new_role)
+                if outcome:
+                    # Telefone é normalizado dentro do helper: sem duplicidade de formato.
+                    _add_step(
+                        log,
+                        "contato salvo pelo whatsapp",
+                        detail=f"{new_name}" + (f" ({new_role})" if new_role else ""),
+                    )
+                    db.commit()
+
+            elif new_name and from_number.isdigit() and re.search(r"[A-Za-zÀ-ÿ]", new_name):
+                # LID ainda sem telefone resolvido: memoriza o nome em memória e
+                # registra o marcador para NÃO repetir o convite.
+                _lid_name_map[from_number] = {"name": new_name[:160], "role": new_role[:80]}
                 _add_step(
                     log,
-                    "contato salvo pelo whatsapp",
-                    detail=f"{new_name}" + (f" ({new_role})" if new_role else ""),
+                    "nome memorizado (número do grupo ainda não resolvido)",
+                    detail=new_name,
                 )
                 db.commit()
 
-        elif new_name and from_number.isdigit() and re.search(r"[A-Za-zÀ-ÿ]", new_name):
-            # LID ainda sem telefone resolvido: memoriza o nome em memória e
-            # registra o marcador para NÃO repetir o convite.
-            _lid_name_map[from_number] = {"name": new_name[:160], "role": new_role[:80]}
-            _add_step(
-                log,
-                "nome memorizado (número do grupo ainda não resolvido)",
-                detail=new_name,
-            )
-            db.commit()
-
-        elif contact is None and log.church_id and from_number.isdigit() and len(from_number) >= 10:
-            # Sem nome capturado: registra como "já convidado a se identificar"
-            # (linha com nome em branco), para a IA NÃO perguntar o nome toda hora.
-            try:
-                db.add(
-                    Contact(
-                        church_id=log.church_id,
-                        phone=canonical_phone(from_number)[:20],
-                        name="",
-                        role="",
+            elif contact is None and log.church_id and from_number.isdigit() and len(from_number) >= 10:
+                # Sem nome capturado: registra como "já convidado a se identificar"
+                # (linha com nome em branco), para a IA NÃO perguntar o nome toda hora.
+                try:
+                    db.add(
+                        Contact(
+                            church_id=log.church_id,
+                            phone=canonical_phone(from_number)[:20],
+                            name="",
+                            role="",
+                        )
                     )
-                )
-                db.commit()
-            except Exception:
-                db.rollback()
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
         # ---- memória automática: guarda só o que for útil para o futuro ----
-        intent = result.get("intent", "")
-        note = result.get("memory_note", "")
-        pendency = result.get("new_pendency", "")
-        ctype = result.get("contact_type", "")
-        if persistable:
-            updates = []
-            if intent and intent != contact.last_intent:
-                contact.last_intent = intent[:160]
-                updates.append(f"intenção: {intent}")
-            if (
-                ctype
-                and ctype.lower() not in ("desconhecido", "não identificado")
-                and ctype != contact.contact_type
-            ):
-                # Só chega aqui quando a pessoa DECLAROU explicitamente o que é.
-                contact.contact_type = ctype[:40]
-                updates.append(f"tipo: {ctype}")
-            if note:
-                db.add(
-                    ContactMemory(
-                        church_id=log.church_id,
-                        contact_id=contact.id,
-                        kind="fato",
-                        content=note[:500],
-                        source="automatica",
+        if config.auto_memory:
+            intent = result.get("intent", "")
+            note = result.get("memory_note", "")
+            pendency = result.get("new_pendency", "")
+            ctype = result.get("contact_type", "")
+            if persistable:
+                updates = []
+                if intent and intent != contact.last_intent:
+                    contact.last_intent = intent[:160]
+                    updates.append(f"intenção: {intent}")
+                if (
+                    ctype
+                    and ctype.lower() not in ("desconhecido", "não identificado")
+                    and ctype != contact.contact_type
+                ):
+                    # Só chega aqui quando a pessoa DECLAROU explicitamente o que é.
+                    contact.contact_type = ctype[:40]
+                    updates.append(f"tipo: {ctype}")
+                if note:
+                    db.add(
+                        ContactMemory(
+                            church_id=log.church_id,
+                            contact_id=contact.id,
+                            kind="fato",
+                            content=note[:500],
+                            source="automatica",
+                        )
                     )
-                )
-                updates.append(f"fato: {note}")
-            if pendency:
-                db.add(
-                    ContactMemory(
-                        church_id=log.church_id,
-                        contact_id=contact.id,
-                        kind="pendencia",
-                        content=pendency[:500],
-                        status="aberta",
-                        source="automatica",
+                    updates.append(f"fato: {note}")
+                if pendency:
+                    db.add(
+                        ContactMemory(
+                            church_id=log.church_id,
+                            contact_id=contact.id,
+                            kind="pendencia",
+                            content=pendency[:500],
+                            status="aberta",
+                            source="automatica",
+                        )
                     )
-                )
-                updates.append(f"pendente: {pendency}")
-            contact.last_talk_at = datetime.utcnow()
-            if updates:
-                _add_step(log, "memória do contato atualizada", detail="; ".join(updates)[:200])
-            db.commit()
+                    updates.append(f"pendente: {pendency}")
+                contact.last_talk_at = datetime.utcnow()
+                if updates:
+                    _add_step(log, "memória do contato atualizada", detail="; ".join(updates)[:200])
+                db.commit()
 
         matched = next((d for d in departments if d["name"].lower() == department_name.lower()), None)
         matched_dep = None
@@ -762,7 +764,7 @@ async def _process_message(log_id: int, instance_name: str):
 
         # 1) Encaminha a mensagem para o grupo do departamento, se houver grupo
         #    configurado e a pergunta não tenha vindo do próprio grupo dele.
-        if matched and matched.get("group_jid") and matched["group_jid"] != log.to_jid:
+        if config.forward_to_groups and matched and matched.get("group_jid") and matched["group_jid"] != log.to_jid:
             sender_label = f"{contact.name} ({from_number})" if contact else from_number
             group_text = (
                 f"NOVA MENSAGEM PARA {matched['name'].upper()}\n"
@@ -780,7 +782,7 @@ async def _process_message(log_id: int, instance_name: str):
 
         # 2) Envia a resposta da LLM: em grupo, responde no próprio grupo;
         #    no privado, no mesmo JID da conversa (preservando @lid/@s.whatsapp.net)
-        if reply:
+        if reply and config.auto_reply:
             reply_jid = log.to_jid or f"{from_number}@s.whatsapp.net"
             try:
                 await evolution.send_text(reply_jid, reply, instance=instance_name)
@@ -839,6 +841,13 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
     if from_me or remote_jid.endswith("@broadcast"):
         return {"ok": True, "skipped": "not_private_or_from_me"}
 
+    # Verifica permissões do webhook antes de processar
+    wconfig = get_or_create_config(db, church_id)
+    if is_group and not wconfig.process_groups:
+        return {"ok": True, "skipped": "groups_disabled"}
+    if not is_group and not wconfig.process_private:
+        return {"ok": True, "skipped": "private_disabled"}
+
     # Em grupos, só responde quando o grupo está vinculado a um departamento ativo
     # da igreja dona da instância (configurado no painel em Departamentos).
     if is_group:
@@ -860,11 +869,17 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     text = _extract_text(data)
     media_key = None
-    if _is_audio(data):
+    is_audio = _is_audio(data)
+    if is_audio:
+        if not wconfig.process_audio:
+            return {"ok": True, "skipped": "audio_disabled"}
         text = ""
         msg = data.get("message") or {}
         audio = msg.get("audioMessage") or msg.get("ptvMessage") or msg.get("voiceMessage") or {}
         media_key = audio.get("mediaKey") or message_id
+
+    if text and not wconfig.process_text:
+        return {"ok": True, "skipped": "text_disabled"}
 
     if not text and not media_key:
         return {"ok": True, "skipped": "no_text"}

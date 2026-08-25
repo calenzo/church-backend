@@ -33,7 +33,9 @@ services:
       CACHE_REDIS_PREFIX_KEY: evolution
       CACHE_REDIS_SAVE_INSTANCES: "true"
       AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-MUDAR_ESTA_CHAVE}
+      WEBHOOK_GLOBAL_ENABLED: "true"
       WEBHOOK_GLOBAL_URL: http://backend:8000/webhook/evolution
+      WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
     depends_on:
       - postgres
       - redis

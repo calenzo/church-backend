@@ -84,6 +84,15 @@ async def lifespan(app: FastAPI):
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_intent VARCHAR(160) DEFAULT ''",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_talk_at TIMESTAMP",
         "ALTER TABLE contacts ADD COLUMN IF NOT EXISTS memory_locked BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS process_text BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS process_audio BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS process_groups BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS process_private BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS auto_reply BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS forward_to_groups BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS apply_routing_rules BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS auto_register_contacts BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE llm_config ADD COLUMN IF NOT EXISTS auto_memory BOOLEAN DEFAULT TRUE",
     ]
     for statement in migrations:
         try:

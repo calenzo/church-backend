@@ -76,6 +76,17 @@ class LLMConfig(Base):
     temperature: Mapped[float] = mapped_column(Float, default=0.3)
     system_prompt: Mapped[str] = mapped_column(Text, default="")
 
+    # Permissões do webhook — toggles que controlam o comportamento do processamento
+    process_text: Mapped[bool] = mapped_column(default=True)
+    process_audio: Mapped[bool] = mapped_column(default=True)
+    process_groups: Mapped[bool] = mapped_column(default=True)
+    process_private: Mapped[bool] = mapped_column(default=True)
+    auto_reply: Mapped[bool] = mapped_column(default=True)
+    forward_to_groups: Mapped[bool] = mapped_column(default=True)
+    apply_routing_rules: Mapped[bool] = mapped_column(default=True)
+    auto_register_contacts: Mapped[bool] = mapped_column(default=True)
+    auto_memory: Mapped[bool] = mapped_column(default=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

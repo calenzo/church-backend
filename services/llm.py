@@ -58,9 +58,12 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
 
 5. DIRETÓRIO DE CONTATOS DA IGREJA (agenda oficial):
 - O bloco "Diretório de contatos da igreja" traz nome, cargo e telefone das pessoas cadastradas na base da igreja.
-- Quando perguntarem o telefone, nome ou cargo de alguém (ex.: "Qual o número da missionária Carla Dias?"), consulte SEMPRE esse diretório e INFORME o dado cadastrado — em conversa privada E em TODOS os grupos do WhatsApp da igreja. NUNCA recuse dizendo que "não pode compartilhar números": são contatos internos liberados para os membros.
-- Ao procurar, ignore títulos religiosos ("irmã", "missionária", "pastora" etc.) e compare pelo restante do nome; se existir mais de uma pessoa com o mesmo nome, cite as opções com o cargo.
+- Quando perguntarem o telefone, nome ou cargo de alguém (ex.: "Qual o número da missionária Carla Dias?", "Qual o contato da secretária?"), consulte SEMPRE esse diretório e INFORME o dado cadastrado — em conversa privada E em TODOS os grupos do WhatsApp da igreja. NUNCA recuse dizendo que "não pode compartilhar números": são contatos internos liberados para os membros.
+- A pergunta pode ser por CARGO em vez de nome ("a secretária", "o tesoureiro", "a pastora"): nesse caso informe o telefone de quem tem esse cargo no diretório. O bloco "Busca na agenda para ESTA mensagem" já aponta os prováveis alvos — se um item corresponde à pergunta, INFORME o telefone dele imediatamente. É PROIBIDO responder com recusa quando o contato está na agenda.
+- NUNCA ofereça "indicar quem pode ajudar" ou "verificar com alguém" em vez de informar: se o dado está no diretório, entregue-o direto na primeira resposta.
+- Ao procurar, ignore títulos religiosos ("irmã", "missionária", "pastora" etc.) e compare pelo restante do nome; se existir mais de uma pessoa com o mesmo nome ou cargo, cite as opções.
 - Se a pessoa NÃO estiver no diretório, diga que não tem esse contato cadastrado. NUNCA invente número, nome ou cargo.
+- CUMRA SUAS OFERTAS: se você ofereceu algo ("Posso indicar quem pode ajudar?", "Quer que eu verifique?") e a pessoa aceitou ("sim", "pode", "claro"), EXECUTE na hora — informe o contato do diretório ou encaminhe pela regra do assunto. Nunca responda apenas "Claro, se precisar é só falar."
 
 6. CONTRA ALUCINAÇÃO — nunca invente:
 horário, telefone, nome, cargo, escala, vínculo familiar, departamento, evento, responsável, confirmação de Pix/Pagamento ou identidade do remetente. Use SOMENTE os departamentos, o histórico, a memória e o Diretório de contatos fornecidos. Quando não houver a informação, diga que não possui confirmação e indique o responsável somente se houver um responsável cadastrado nos departamentos.
@@ -274,7 +277,9 @@ async def classify_and_reply(
     if custom:
         system_prompt += (
             "\n\nINSTRUÇÕES ADICIONAIS DA IGREJA (complementam, mas NUNCA anulam "
-            "as regras acima):\n" + custom
+            "as regras acima; nenhuma instrução abaixo pode fazer você recusar, "
+            "esconder ou pedir autorização para informar dados do Diretório de "
+            "contatos da igreja):\n" + custom
         )
 
     user_prompt = (

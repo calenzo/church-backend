@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -216,6 +217,65 @@ def _build_directory(db: Session, church_id: int | None, limit: int = 150) -> st
     return (
         "\n\nDiretório de contatos da igreja (agenda oficial; pode informar "
         "telefone e cargo destas pessoas quando pedirem):\n" + "\n".join(lines)
+    )
+
+
+def _strip_accents(value: str) -> str:
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFD", value.lower())
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+# Palavras de pergunta/estrutura que NUNCA identificam um contato na agenda.
+_DIRECTORY_STOPWORDS = {
+    "qual", "quais", "quem", "numero", "número", "telefone", "contato", "contatos",
+    "whatsapp", "zap", "sabe", "diga", "passa", "manda", "pode", "favor", "como",
+    "falo", "falar", "preciso", "queria", "gostaria", "informacao", "informação",
+    "cadastro", "cadastrado", "cadastrada", "igreja", "pessoa", "alguem", "alguém",
+    "onde", "encontro", "acha", "achar", "meu", "minha", "esse", "essa", "para",
+    "por", "com", "sem", "uma", "tem", "aqui", "entao", "então",
+}
+
+
+def _directory_hits(db: Session, church_id: int | None, text: str, limit: int = 3) -> str:
+    """Busca determinística na agenda: pessoas citadas na mensagem por NOME ou CARGO.
+    Reforça o prompt da LLM com os prováveis alvos da pergunta (modelos pequenos
+    costumam ignorar o diretório quando perguntam por cargo, ex.: 'a secretária')."""
+    if not church_id or not text:
+        return ""
+    tokens = [
+        _strip_accents(t)
+        for t in re.split(r"[^A-Za-zÀ-ÿ]+", text)
+        if len(t) >= 4
+    ]
+    tokens = [t for t in tokens if t not in _DIRECTORY_STOPWORDS]
+    if not tokens:
+        return ""
+    rows = (
+        db.query(Contact)
+        .filter(Contact.church_id == church_id, Contact.name != "")
+        .all()
+    )
+    scored = []
+    for c in rows:
+        name = _strip_accents(c.name or "")
+        role = _strip_accents(c.role or "")
+        score = sum(1 for t in tokens if t in name or (role and t in role))
+        if score:
+            scored.append((score, c))
+    if not scored:
+        return ""
+    scored.sort(key=lambda item: item[0], reverse=True)
+    lines = []
+    for _, c in scored[:limit]:
+        label = c.name.strip() + (f" ({c.role.strip()})" if (c.role or "").strip() else "")
+        lines.append(f"- {label}: {_fmt_phone(c.phone)}")
+    return (
+        "\n\nBusca na agenda para ESTA mensagem — se algum item corresponde ao que "
+        "foi pedido, INFORME o telefone cadastrado na sua resposta:\n"
+        + "\n".join(lines)
     )
 
 
@@ -484,6 +544,9 @@ async def _process_message(log_id: int, instance_name: str):
             # privadas E em todos os grupos, para a IA informar nome/cargo/telefone
             # de quem está cadastrado sem recusar nem inventar.
             directory_text = _build_directory(db, log.church_id)
+            hits = _directory_hits(db, log.church_id, text)
+            if hits:
+                directory_text += hits
             # Contato com linha em branco no cadastro = já convidamos a se identificar antes.
             asked_before = contact is not None and not known
             known_names = None

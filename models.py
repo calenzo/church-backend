@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -178,3 +178,84 @@ class MessageLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     department: Mapped[Department | None] = relationship(back_populates="messages")
+
+
+# ----------------------------- Membros / aniversários -----------------------------
+
+
+class Member(Base):
+    """Membro da igreja para lembretes de aniversário (dia + mês, sem ano)."""
+
+    __tablename__ = "members"
+    __table_args__ = (
+        UniqueConstraint("church_id", "name", "birth_day", "birth_month", name="uq_members_unique"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    birth_day: Mapped[int] = mapped_column(Integer)  # 1..31
+    birth_month: Mapped[int] = mapped_column(Integer)  # 1..12
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BirthdayRecipient(Base):
+    """Destinatário configurável dos lembretes de aniversário."""
+
+    __tablename__ = "birthday_recipients"
+    __table_args__ = (
+        UniqueConstraint("church_id", "phone", name="uq_birthday_recipients_phone"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160), default="")
+    phone: Mapped[str] = mapped_column(String(20))  # dígitos normalizados
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BirthdayConfig(Base):
+    """Configuração do lembrete por igreja (horário de envio, fuso America/Sao_Paulo)."""
+
+    __tablename__ = "birthday_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), unique=True, index=True)
+    send_time: Mapped[str] = mapped_column(String(5), default="08:00")  # "HH:MM"
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class BirthdayLog(Base):
+    """Histórico + controle antidualidade: 1 linha por (igreja, data, destinatário).
+    A chave ref_date (ano-mês-dia) garante reenvio no próximo ano sem duplicar no mesmo dia.
+    kind: 'aniversario' (real) ou 'teste' (botão da aba). status: pendente|enviado|falhou."""
+
+    __tablename__ = "birthday_logs"
+    __table_args__ = (
+        UniqueConstraint("church_id", "ref_date", "recipient_id", name="uq_birthday_once"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    recipient_id: Mapped[int | None] = mapped_column(ForeignKey("birthday_recipients.id"), nullable=True)
+    recipient_name: Mapped[str] = mapped_column(String(160), default="")
+    phone: Mapped[str] = mapped_column(String(20), default="")
+    members_text: Mapped[str] = mapped_column(Text, default="")  # nomes dos aniversariantes
+    message: Mapped[str] = mapped_column(Text, default="")
+    kind: Mapped[str] = mapped_column(String(20), default="aniversario")
+    status: Mapped[str] = mapped_column(String(20), default="pendente")
+    error: Mapped[str] = mapped_column(Text, default="")
+    ref_date: Mapped[date] = mapped_column(Date, index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BirthdaySeedFlag(Base):
+    """Marca que a carga inicial de membros/destinatários já rodou para a igreja.
+    Garante seed único: reinícios NUNCA duplicam os registros iniciais."""
+
+    __tablename__ = "birthday_seed_flags"
+
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), primary_key=True)
+    seeded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

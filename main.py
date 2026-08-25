@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import sys
 
@@ -8,8 +9,10 @@ from sqlalchemy import text
 
 from config import settings
 from database import Base, SessionLocal, engine
-from routers import board, webhook
+from routers import board, membros, webhook
 from services import evolution as evolution_service
+from services.birthday_scheduler import run_loop as birthday_loop
+from services.birthday_seed import seed_birthday_data
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,8 +92,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # SQLite não suporta IF NOT EXISTS; colunas já nascem pelo create_all
     _seed_multi_tenant()
+    seed_birthday_data()  # carga inicial de membros: uma única vez por igreja
+    birthday_task = asyncio.create_task(birthday_loop())
     logger.info("Backend iniciado com sucesso")
     yield
+    birthday_task.cancel()
     logger.info("Backend desligando (SIGTERM recebido)")
     engine.dispose()
     evolution_service.invalidate_groups_cache()
@@ -108,6 +114,7 @@ app.add_middleware(
 
 app.include_router(webhook.router)
 app.include_router(board.router)
+app.include_router(membros.router)
 
 
 @app.get("/")

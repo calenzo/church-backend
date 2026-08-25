@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class LlmConfigOut(BaseModel):
@@ -243,3 +243,99 @@ class NumberOut(BaseModel):
     phone: str
     active: bool
     created_at: datetime | None = None
+
+# ----------------------------- Membros / aniversários -----------------------------
+
+
+def _validate_birthday(day: int, month: int) -> None:
+    """Dia/mês plausíveis e data real (31/02 é rejeitado)."""
+    if not 1 <= day <= 31:
+        raise ValueError("Dia deve estar entre 1 e 31")
+    if not 1 <= month <= 12:
+        raise ValueError("Mês deve estar entre 1 e 12")
+    try:
+        datetime(2020, month, day)
+    except ValueError as exc:
+        raise ValueError(f"Data inválida: {day:02d}/{month:02d}") from exc
+
+
+class MemberCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    birth_day: int = Field(ge=1, le=31)
+    birth_month: int = Field(ge=1, le=12)
+
+    @model_validator(mode="after")
+    def check_date(self):
+        _validate_birthday(self.birth_day, self.birth_month)
+        return self
+
+
+class MemberUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    birth_day: int | None = Field(default=None, ge=1, le=31)
+    birth_month: int | None = Field(default=None, ge=1, le=12)
+
+
+class MemberOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    birth_day: int
+    birth_month: int
+    birthday: str = ""  # "dd/mm"
+    is_today: bool = False
+
+
+class RecipientCreate(BaseModel):
+    name: str = Field(default="", max_length=160)
+    phone: str = Field(min_length=10, max_length=30)
+
+
+class RecipientUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=160)
+    phone: str | None = Field(default=None, min_length=10, max_length=30)
+    active: bool | None = None
+
+
+class RecipientOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    phone: str
+    active: bool
+
+
+class BirthdayConfigOut(BaseModel):
+    send_time: str
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BirthdayConfigIn(BaseModel):
+    send_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class ReminderLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    recipient_name: str
+    phone: str
+    members_text: str
+    message: str
+    kind: str
+    status: str
+    error: str
+    ref_date: date
+    sent_at: datetime | None
+    created_at: datetime | None
+
+
+class UpcomingBirthday(BaseModel):
+    name: str
+    birthday: str  # "dd/mm"
+    days_until: int
+    is_today: bool

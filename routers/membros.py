@@ -3,6 +3,10 @@
 Funcionalidade isolada — não altera contatos, IA, departamentos nem WhatsApp.
 O disparo automático vive em services/birthday_scheduler.py; aqui ficam apenas
 os endpoints de gerenciamento usados pela aba.
+
+IMPORTANTE: rotas fixas (config, hoje, proximos, destinatarios, lembretes)
+devem ser registradas ANTES das parametrizadas (/{member_id}) para evitar
+que o FastAPI tente casar strings como "config" no parâmetro int.
 """
 
 from datetime import date, datetime
@@ -41,6 +45,9 @@ router = APIRouter(prefix="/api/membros", tags=["membros"])
 
 _TZ = ZoneInfo("America/Sao_Paulo")
 CHURCH_LABEL = "Recâmaras do Rei"
+
+
+# ------------------------------- helpers -------------------------------
 
 
 def _fmt_birthday(day: int, month: int) -> str:
@@ -90,82 +97,30 @@ def _reject_duplicate(db: Session, church_id: int, name: str, day: int, month: i
         raise HTTPException(status_code=400, detail="Este membro já está cadastrado.")
 
 
-# ------------------------------- Membros -------------------------------
+def _recipient_or_404(db: Session, church_id: int, recipient_id: int) -> BirthdayRecipient:
+    row = db.get(BirthdayRecipient, recipient_id)
+    if not row or row.church_id != church_id:
+        raise HTTPException(status_code=404, detail="Destinatário não encontrado")
+    return row
 
 
-@router.get("", response_model=list[MemberOut])
-def list_members(
-    search: str | None = Query(default=None, max_length=120),
-    church_id: int | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Lista alfabética; busca opcional por parte do nome."""
-    church = _resolve_church(db, user, church_id)
-    query = db.query(Member).filter(Member.church_id == church.id)
-    if search and search.strip():
-        query = query.filter(Member.name.ilike(f"%{search.strip()}%"))
-    rows = query.order_by(Member.name).all()
-    today = datetime.now(_TZ).date()
-    return [_member_out(m, today) for m in rows]
+def _get_or_create_config(db: Session, church_id: int) -> BirthdayConfig:
+    config = db.query(BirthdayConfig).filter(BirthdayConfig.church_id == church_id).first()
+    if not config:
+        config = BirthdayConfig(church_id=church_id, send_time="08:00")
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+    return config
 
 
-@router.post("", response_model=MemberOut, status_code=201)
-def create_member(
-    data: MemberCreate,
-    church_id: int | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    church = _resolve_church(db, user, church_id)
-    name = data.name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Informe o nome completo")
-    _reject_duplicate(db, church.id, name, data.birth_day, data.birth_month)
-    member = Member(church_id=church.id, name=name, birth_day=data.birth_day, birth_month=data.birth_month)
-    db.add(member)
-    db.commit()
-    db.refresh(member)
-    return _member_out(member)
+# =====================================================================
+#  ROTAS FIXAS — registradas ANTES das parametrizadas para evitar
+#  que PUT /config ou GET /destinatarios sejam casados com /{member_id}.
+# =====================================================================
 
 
-@router.put("/{member_id}", response_model=MemberOut)
-def update_member(
-    member_id: int,
-    data: MemberUpdate,
-    church_id: int | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    church = _resolve_church(db, user, church_id)
-    member = _get_member(db, church.id, member_id)
-    name = (data.name if data.name is not None else member.name).strip()
-    day = data.birth_day if data.birth_day is not None else member.birth_day
-    month = data.birth_month if data.birth_month is not None else member.birth_month
-    if not name:
-        raise HTTPException(status_code=400, detail="Nome não pode ficar vazio")
-    try:
-        MemberCreate(name=name, birth_day=day, birth_month=month)  # valida dia/mês/data real
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    _reject_duplicate(db, church.id, name, day, month, exclude_id=member.id)
-    member.name, member.birth_day, member.birth_month = name, day, month
-    db.commit()
-    db.refresh(member)
-    return _member_out(member)
-
-
-@router.delete("/{member_id}", status_code=204)
-def delete_member(
-    member_id: int,
-    church_id: int | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    church = _resolve_church(db, user, church_id)
-    member = _get_member(db, church.id, member_id)
-    db.delete(member)
-    db.commit()
+# ------------------------------- Aniversários -------------------------------
 
 
 @router.get("/hoje", response_model=list[UpcomingBirthday])
@@ -211,28 +166,18 @@ def upcoming_birthdays(
         return delta
 
     rows = sorted(members, key=sort_key)[:limit]
-    result = []
-    for m in rows:
-        delta = sort_key(m)
-        result.append(
-            UpcomingBirthday(
-                name=m.name,
-                birthday=_fmt_birthday(m.birth_day, m.birth_month),
-                days_until=delta,
-                is_today=(delta == 0),
-            )
+    return [
+        UpcomingBirthday(
+            name=m.name,
+            birthday=_fmt_birthday(m.birth_day, m.birth_month),
+            days_until=sort_key(m),
+            is_today=(sort_key(m) == 0),
         )
-    return result
+        for m in rows
+    ]
 
 
 # ------------------------------- Destinatários -------------------------------
-
-
-def _recipient_or_404(db: Session, church_id: int, recipient_id: int) -> BirthdayRecipient:
-    row = db.get(BirthdayRecipient, recipient_id)
-    if not row or row.church_id != church_id:
-        raise HTTPException(status_code=404, detail="Destinatário não encontrado")
-    return row
 
 
 @router.get("/destinatarios", response_model=list[RecipientOut])
@@ -326,16 +271,6 @@ def delete_recipient(
 # ------------------------------- Configuração -------------------------------
 
 
-def _get_or_create_config(db: Session, church_id: int) -> BirthdayConfig:
-    config = db.query(BirthdayConfig).filter(BirthdayConfig.church_id == church_id).first()
-    if not config:
-        config = BirthdayConfig(church_id=church_id, send_time="08:00")
-        db.add(config)
-        db.commit()
-        db.refresh(config)
-    return config
-
-
 @router.get("/config", response_model=BirthdayConfigOut)
 def get_config(
     church_id: int | None = None,
@@ -413,3 +348,84 @@ async def send_test(
             results.append({"name": r.name, "phone": r.phone, "ok": False, "error": str(exc)})
     failed = [r for r in results if not r["ok"]]
     return {"sent": len(results) - len(failed), "failed": len(failed), "results": results}
+
+
+# =====================================================================
+#  ROTAS PARAMETRIZADAS — registradas POR ÚLTIMO para não capturar
+#  "config", "hoje", "proximos", "destinatarios", "lembretes" etc.
+# =====================================================================
+
+
+@router.get("", response_model=list[MemberOut])
+def list_members(
+    search: str | None = Query(default=None, max_length=120),
+    church_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Lista alfabética; busca opcional por parte do nome."""
+    church = _resolve_church(db, user, church_id)
+    query = db.query(Member).filter(Member.church_id == church.id)
+    if search and search.strip():
+        query = query.filter(Member.name.ilike(f"%{search.strip()}%"))
+    rows = query.order_by(Member.name).all()
+    today = datetime.now(_TZ).date()
+    return [_member_out(m, today) for m in rows]
+
+
+@router.post("", response_model=MemberOut, status_code=201)
+def create_member(
+    data: MemberCreate,
+    church_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    church = _resolve_church(db, user, church_id)
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Informe o nome completo")
+    _reject_duplicate(db, church.id, name, data.birth_day, data.birth_month)
+    member = Member(church_id=church.id, name=name, birth_day=data.birth_day, birth_month=data.birth_month)
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+    return _member_out(member)
+
+
+@router.put("/{member_id}", response_model=MemberOut)
+def update_member(
+    member_id: int,
+    data: MemberUpdate,
+    church_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    church = _resolve_church(db, user, church_id)
+    member = _get_member(db, church.id, member_id)
+    name = (data.name if data.name is not None else member.name).strip()
+    day = data.birth_day if data.birth_day is not None else member.birth_day
+    month = data.birth_month if data.birth_month is not None else member.birth_month
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome não pode ficar vazio")
+    try:
+        MemberCreate(name=name, birth_day=day, birth_month=month)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _reject_duplicate(db, church.id, name, day, month, exclude_id=member.id)
+    member.name, member.birth_day, member.birth_month = name, day, month
+    db.commit()
+    db.refresh(member)
+    return _member_out(member)
+
+
+@router.delete("/{member_id}", status_code=204)
+def delete_member(
+    member_id: int,
+    church_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    church = _resolve_church(db, user, church_id)
+    member = _get_member(db, church.id, member_id)
+    db.delete(member)
+    db.commit()

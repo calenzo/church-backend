@@ -19,6 +19,7 @@ from database import SessionLocal
 from models import BirthdayConfig, BirthdayLog, BirthdayRecipient, Church, Member, WhatsAppNumber
 from services import evolution
 from services.evolution import EvolutionError, send_text
+from services.safety import safe_send, get_church_safety
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +115,30 @@ async def _deliver(db, church: Church, recipients, names: list[str], ref_date: d
             church.id, destino, recipient.phone, instance,
         )
         try:
-            resp = await send_text(destino, message, instance=instance)
-            # Verifica se a Evolution API retornou erro dentro do body (HTTP 200 mas falha interna)
-            resp_status = (resp or {}).get("status") if isinstance(resp, dict) else None
-            if resp_status and resp_status not in ("SENT", "DELIVERY_ACK", "DISPLAYED", "READ"):
+            result = await safe_send(
+                church.id, destino, message,
+                instance=instance, message_id=f"bday:{church.id}:{recipient.id}:{ref_date}",
+            )
+            if not result.get("ok"):
                 log.status = "pendente"
-                log.error = f"Evolution retornou status: {resp_status}"
+                log.error = f"Bloqueado por segurança: {result.get('status')} {result.get('detail', '')}"
                 logger.warning(
-                    "Lembrete aniversário: Evolution retornou status inesperado '%s' para %s",
-                    resp_status, recipient.phone,
+                    "Lembrete aniversário: bloqueado para %s — %s",
+                    recipient.phone, result.get("status"),
                 )
             else:
-                log.status = "enviado"
-                log.error = ""
+                resp = result.get("response")
+                resp_status = (resp or {}).get("status") if isinstance(resp, dict) else None
+                if resp_status and resp_status not in ("SENT", "DELIVERY_ACK", "DISPLAYED", "READ"):
+                    log.status = "pendente"
+                    log.error = f"Evolution retornou status: {resp_status}"
+                    logger.warning(
+                        "Lembrete aniversário: Evolution retornou status inesperado '%s' para %s",
+                        resp_status, recipient.phone,
+                    )
+                else:
+                    log.status = "enviado"
+                    log.error = ""
                 log.sent_at = datetime.now(_TZ)
         except EvolutionError as exc:
             # Não perde o aviso: fica pendente e o próximo ciclo tenta de novo.

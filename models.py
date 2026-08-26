@@ -270,3 +270,15 @@ class BirthdaySeedFlag(Base):
 
     church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), primary_key=True)
     seeded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SafetyLog(Base):
+    """Log de eventos de segurança: proteção, pausa, erros, reconexões."""
+
+    __tablename__ = "safety_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(40), default="info")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -14,6 +14,7 @@ from database import SessionLocal, get_db
 from models import Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
 from services.phone import canonical as canonical_phone, only_digits, variants as phone_variants
+from services.safety import safe_send, get_church_safety
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +621,10 @@ async def _process_message(log_id: int, instance_name: str):
                     f'Mensagem: "{text[:500]}"'
                 )
                 try:
-                    await evolution.send_text(destino, notificacao, instance=instance_name)
+                    await safe_send(
+                        log.church_id or 1, destino, notificacao,
+                        instance=instance_name, message_id=f"fw:{dedup_key}",
+                    )
                     _forward_recently[dedup_key] = datetime.utcnow()
                     reply = f"Sua mensagem foi encaminhada para {alvo}."
                     _add_step(log, "encaminhado para o responsável", detail=f"{alvo} ({destino})")
@@ -771,7 +775,10 @@ async def _process_message(log_id: int, instance_name: str):
                 f"De: {sender_label}\n\n{text}"
             )
             try:
-                await evolution.send_text(matched["group_jid"], group_text, instance=instance_name)
+                await safe_send(
+                    log.church_id or 1, matched["group_jid"], group_text,
+                    instance=instance_name, message_id=f"grp:{log.id}",
+                )
                 _add_step(log, "encaminhado para o grupo", detail=matched["group_jid"])
             except evolution.EvolutionError as exc:
                 logger.error("Falha ao encaminhar para o grupo %s: %s", matched["group_jid"], exc)
@@ -785,8 +792,14 @@ async def _process_message(log_id: int, instance_name: str):
         if reply and config.auto_reply:
             reply_jid = log.to_jid or f"{from_number}@s.whatsapp.net"
             try:
-                await evolution.send_text(reply_jid, reply, instance=instance_name)
-                _add_step(log, "resposta enviada ao grupo" if reply_in_group else "resposta enviada ao membro")
+                result = await safe_send(
+                    log.church_id or 1, reply_jid, reply,
+                    instance=instance_name, message_id=f"reply:{log.id}",
+                )
+                if result.get("status") in ("paused", "blocked"):
+                    _add_step(log, f"resposta bloqueada: {result.get('status')}", status="warn")
+                else:
+                    _add_step(log, "resposta enviada ao grupo" if reply_in_group else "resposta enviada ao membro")
             except evolution.EvolutionError as exc:
                 logger.error("Falha ao responder %s: %s", from_number, exc)
                 log.error = log.error or ""

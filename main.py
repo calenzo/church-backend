@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from config import settings
 from database import Base, SessionLocal, engine
-from routers import board, membros, webhook
+from routers import board, membros, safety, webhook
 from services import evolution as evolution_service
 from services.birthday_scheduler import run_loop as birthday_loop
 from services.birthday_seed import seed_birthday_data
@@ -124,6 +124,7 @@ app.add_middleware(
 app.include_router(webhook.router)
 app.include_router(board.router)
 app.include_router(membros.router)
+app.include_router(safety.router)
 
 
 @app.get("/")

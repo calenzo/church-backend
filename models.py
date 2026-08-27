@@ -344,3 +344,27 @@ class ChurchKnowledge(Base):
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GroupSendLog(Base):
+    """Registro de cada envio real para grupos do WhatsApp via comandos da IA ou testes.
+
+    status: pendente / enviando / enviado / erro.
+    Só marca 'enviado' quando o WhatsApp/Evolution confirma o envio (messageId presente).
+    """
+
+    __tablename__ = "group_send_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    user_name: Mapped[str] = mapped_column(String(120), default="")
+    phone: Mapped[str] = mapped_column(String(20), default="")
+    group_name: Mapped[str] = mapped_column(String(160), default="")
+    group_id: Mapped[str] = mapped_column(String(120), default="")
+    message: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pendente")  # pendente/enviando/enviado/erro
+    message_id: Mapped[str] = mapped_column(String(120), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    origin: Mapped[str] = mapped_column(String(20), default="ia")  # ia / teste
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

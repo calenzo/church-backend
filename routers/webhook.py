@@ -14,6 +14,7 @@ from database import SessionLocal, get_db
 from models import AdminAction, AuthorizedUser, Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
 from services.admin_commands import analyze_admin_command
+from services.group_send import execute_group_send, get_last_send_log, resolve_group_target
 from services.phone import canonical as canonical_phone, only_digits, variants as phone_variants
 from services.safety import safe_send, get_church_safety
 
@@ -506,53 +507,83 @@ async def _process_message(log_id: int, instance_name: str):
                 final_reply = admin.reply
                 send_result = "none"
 
-                # Ação real: enviar aviso ao grupo WhatsApp vinculado ao departamento.
-                # Só informa sucesso após o retorno real da API/WhatsApp.
-                targets_group = (
+                # Consulta ao status REAL do último envio ("Já enviou?").
+                if admin.intent == "consultar_status_envio":
+                    last = get_last_send_log(db, log.church_id or 1, phone=from_number)
+                    if last is None:
+                        final_reply = "Não há envios recentes registrados."
+                    elif last.status == "enviado":
+                        final_reply = f"Sim. O aviso foi enviado para o grupo {last.group_name}."
+                    elif last.status == "erro":
+                        final_reply = "Não. A tentativa de envio apresentou erro."
+                    else:
+                        final_reply = "O envio ainda está sendo processado."
+                    send_result = "status_reply"
+                    _add_step(log, "status consultado", detail=last.status if last else "nenhum")
+
+                # Ação real: enviar mensagem ao grupo do WhatsApp.
+                executed = False
+                if (
                     admin.intent == "enviar_aviso_grupo"
                     and bool(admin.action_data.get("message"))
-                    and bool(admin.action_data.get("group_id"))
                     and not admin.action_data.get("draft_only")
-                )
-                if targets_group:
-                    group_id = admin.action_data["group_id"]
+                ):
                     group_name = (
                         admin.action_data.get("group_name")
                         or admin.action_data.get("department")
                         or "grupo"
                     )
+                    group_id = admin.action_data.get("group_id") or ""
                     message = admin.action_data["message"]
                     dept_name = admin.action_data.get("department", "")
-                    try:
-                        result = await safe_send(
-                            log.church_id or 1,
-                            group_id,
-                            message,
-                            instance=instance_name,
-                            message_id=f"admin-group:{log.id}",
-                            is_reply=False,
+                    user_name = admin.action_data.get("source_user", "") or ""
+
+                    # Sem JID cadastrado: resolve na lista REAL do WhatsApp pelo nome.
+                    if not group_id:
+                        hit = await resolve_group_target(
+                            db, log.church_id or 1, group_name, instance=instance_name
                         )
-                        if result.get("ok"):
-                            send_result = "success"
-                            final_reply = f"Aviso enviado ao grupo {group_name}."
+                        if hit and hit.get("group_id"):
+                            group_id = hit["group_id"]
+                            group_name = hit["name"] or group_name
+                            if not admin.action_data.get("group_id"):
+                                admin.action_data["group_id"] = group_id
+
+                    if not group_id:
+                        final_reply = f"Não encontrei o grupo {group_name}."
+                        send_result = "not_found"
+                        logger.info(
+                            "[COMMAND] enviar_mensagem_grupo [AUTHORIZED_USER] true "
+                            "[GROUP_NAME] %s [RESULT] grupo não encontrado", group_name,
+                        )
+                    else:
+                        outcome = await execute_group_send(
+                            db, log.church_id or 1,
+                            group_id=group_id,
+                            group_name=group_name,
+                            message=message,
+                            instance=instance_name,
+                            user_name=user_name,
+                            phone=from_number,
+                            origin="ia",
+                            dedup_key=f"admin-group:{log.id}",
+                        )
+                        executed = True
+                        send_result = outcome["status"]
+                        if outcome["ok"]:
+                            final_reply = f"Aviso enviado para o grupo {group_name}."
                         else:
-                            send_result = result.get("status", "error")
-                            final_reply = f"Não consegui enviar o aviso ao grupo {group_name}."
-                            detail = result.get("detail", "")
-                            if detail:
-                                log.error = (log.error or "") + f" | enviar_aviso_grupo: {detail}"
-                    except evolution.EvolutionError as exc:
-                        send_result = "error"
-                        final_reply = f"Não consegui enviar o aviso ao grupo {group_name}."
-                        log.error = (log.error or "") + f" | enviar_aviso_grupo: {exc}"
-                        log.status = "routed_with_error"
-                        logger.error("Falha ao enviar aviso ao grupo %s: %s", group_id, exc)
-                    logger.info(
-                        "[COMMAND] enviar_aviso_grupo [AUTHORIZED_USER] true "
-                        "[DEPARTMENT] %s [GROUP_ID] %s [MESSAGE] %s [SEND_RESULT] %s",
-                        dept_name or "?", group_id, message, send_result,
-                    )
-                    _add_step(log, f"envio ao grupo: {send_result}", detail=group_id[:40])
+                            final_reply = f"Não consegui enviar o aviso para o grupo {group_name}."
+                            if outcome.get("error"):
+                                log.error = (log.error or "") + f" | enviar_mensagem_grupo: {outcome['error']}"
+                            if outcome["status"] == "erro":
+                                log.status = "routed_with_error"
+                        logger.info(
+                            "[COMMAND] enviar_mensagem_grupo [AUTHORIZED_USER] true "
+                            "[DEPARTMENT] %s [GROUP_ID] %s [MESSAGE] %s [SEND_RESULT] %s",
+                            dept_name or "?", group_id, message, send_result,
+                        )
+                    _add_step(log, f"envio ao grupo: {send_result}", detail=group_id[:40] or group_name[:40])
 
                 try:
                     await safe_send(
@@ -573,10 +604,10 @@ async def _process_message(log_id: int, instance_name: str):
                         raw_command=text[:500],
                         intent=admin.intent,
                         action=f"status={send_result}",
-                        target=admin.action_data.get("group_id", ""),
+                        target=admin.action_data.get("group_id", "") or admin.action_data.get("group_name", ""),
                         department=admin.action_data.get("department", ""),
                         new_value=admin.action_data.get("message", ""),
-                        status="executado" if targets_group else "recebido",
+                        status="executado" if (executed or send_result == "status_reply") else "recebido",
                     ))
                 except Exception:
                     db.rollback()

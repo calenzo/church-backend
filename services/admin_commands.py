@@ -135,8 +135,42 @@ _GROUP_REFERENCE_PATTERNS = re.compile(
 # Separa a menção do alvo ("que", "para", ":", ",") do conteúdo da mensagem.
 _MESSAGE_SEP_RE = re.compile(r"^\s*(?:que\s*|para\s*|:\s*|,\s*)+", re.IGNORECASE)
 
+
+def _message_after(rest: str) -> str:
+    """Separa o conteúdo da mensagem do trecho logo após a menção do grupo.
+
+    Se o trecho começar com ':', ',' ou '-' o conteúdo é preservado literalmente
+    (ex.: "...grupo Contatos da Igreja: QUE A BICICLETA É DA FATIMA" -> o "QUE"
+    faz parte da mensagem e NÃO deve ser removido).
+    Caso contrário, remove conectores falados ('que'/'para'/'de') que apenas
+    ligam "avise o grupo X ... mensagem"."""
+    if re.match(r"^\s*[:,\-]", rest or ""):
+        return re.sub(r"^\s*[:,\-]+\s*", "", rest or "").strip().rstrip(".!")
+    return _MESSAGE_SEP_RE.sub("", rest or "").strip().rstrip(".!")
+
 # Intervalos de busca do nome do departamento: não muito longe do verbo de envio.
 _MAX_TARGET_DISTANCE = 60
+
+# Captura genérica de um grupo citado ("o grupo X", "grupo X:", "no grupo de X").
+# O nome para no primeiro conector de mensagem (que/para/sobre).
+_GROUP_CLAIM_RE = re.compile(
+    r"(?:para\s+(?:o|a)\s+)?(?:no\s+)?(?:grupo|group|departamento)"
+    r"\s*(?:de|do|da|dos|das)?\s*:?\s*"
+    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*)"
+    r"(?:\s+(?!(?:que|para|sobre)\b)[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*){0,7}"
+    r"(?=\s*(?::\s*|,\s*|que\b|para\b|sobre\b|$))",
+    re.IGNORECASE,
+)
+
+# Consulta ao status real do último envio ("Já enviou?", "Foi enviado?", ...).
+_SEND_STATUS_QUERY_PATTERNS = re.compile(
+    r"(^(já|ja)\s+(?:foi\s+)?(enviou|mandou|enviad[oa])|"
+    r"^(foi\s+(enviado|mandado|enviada))|"
+    r"(o\s+aviso\s+foi|o\s+envio\s*foi|deu\s+certo\s+o\s+envio|deu\s+certo\s+pra\s+enviar)|"
+    r"chegou\s+(no\s+grupo|nos\s+grupos)|e\s+o\s+aviso|"
+    r"enviou\?$|mandou\?$|enviad[oa]\?$)",
+    re.IGNORECASE,
+)
 
 _SCHEDULE_PATTERNS = re.compile(
     r"(agende|agendar|lembrete para|avise.* às|avise.* amanhã|avise.* segunda|avise.* terça|avise.* quarta|avise.* quinta|avise.* sexta|avise.* sábado|avise.* domingo)",
@@ -264,12 +298,30 @@ def _accent_regex(name: str) -> str:
     return "".join(out)
 
 
-def _resolve_send_target(db: Session, church_id: int, text: str):
-    """Encontra o departamento citado na mensagem e o grupo WhatsApp vinculado.
+def _extract_group_reference(text: str):
+    """Captura genérica do grupo citado na frase ('o grupo Contatos da Igreja').
 
-    Retorna (department, group_name, group_id, message, mention_index) ou None.
-    A mensagem é o trecho após a menção do departamento (removendo 'que', 'para', ':').
-    Nunca inventa vínculo: usa exclusivamente o cadastro de Departamentos."""
+    Retorna (nome, posição final da menção) ou None.
+    Usado como fallback quando nenhum departamento casa com o texto."""
+    m = _GROUP_CLAIM_RE.search(text or "")
+    if not m:
+        return None
+    name = m.group(1).strip()
+    if len(name) < 2:
+        return None
+    return name, m.end()
+
+
+def _resolve_send_target(db: Session, church_id: int, text: str):
+    """Resolve o alvo do envio citado na mensagem (departamento OU nome de grupo).
+
+    Retorna dict:
+      {department, department_name, group_name, group_id, message, generic}
+    Onde group_id pode ser vazio se o departamento não tiver grupo vinculado;
+    nesse caso o executor real busca na lista REAL do WhatsApp pelo nome.
+
+    Nunca inventa vínculo: usa o cadastro de Departamentos e, como fallback,
+    apenas o nome do grupo citado textualmente."""
     if not (text or "").strip():
         return None
     verb = _NOTIFY_GROUP_PATTERNS.search(text)
@@ -304,12 +356,32 @@ def _resolve_send_target(db: Session, church_id: int, text: str):
                     if best is None or score > best[0] or (score == best[0] and idx < best[2]):
                         best = (score, d, m.start(), m.end())
 
-    if best is None:
-        return None
-    _, department, start, end = best
-    rest = text[end:]
-    message = _MESSAGE_SEP_RE.sub("", rest).strip().rstrip(".!")
-    return (department, department.group_name or department.name, department.group_jid, message, start)
+    if best:
+        _, department, start, end = best
+        message = _message_after(text[end:])
+        return {
+            "department": department,
+            "department_name": department.name,
+            "group_name": department.group_name or department.name,
+            "group_id": department.group_jid,
+            "message": message,
+            "generic": False,
+        }
+
+    # Fallback: nome do grupo citado textualmente (sem cadastro prévio).
+    ref = _extract_group_reference(text)
+    if ref:
+        name, end = ref
+        message = _message_after(text[end:])
+        return {
+            "department": None,
+            "department_name": "",
+            "group_name": name,
+            "group_id": "",
+            "message": message,
+            "generic": True,
+        }
+    return None
 
 
 # ── Função principal ─────────────────────────────────────────────────
@@ -385,6 +457,15 @@ def analyze_admin_command(
             action_data={"raw": text_clean},
         )
 
+    # ── "Já enviou?" — consulta ao status REAL da última ação ────────
+    if _SEND_STATUS_QUERY_PATTERNS.search(text_clean):
+        return AdminResult(
+            recognized=True,
+            intent="consultar_status_envio",
+            reply="Consultando o status real do envio...",
+            action_data={"source_user": user.name},
+        )
+
     # ── "Avise o grupo X que Y" ─────────────────────────────────────
     if _NOTIFY_GROUP_PATTERNS.search(text_clean):
         if not check_permission(user, "enviar_avisos"):
@@ -409,24 +490,44 @@ def analyze_admin_command(
             # Sem menção clara de um grupo/departamento: segue o fluxo normal da IA.
             return AdminResult(recognized=False)
 
-        department, group_name, group_id, message, _ = target
+        department = target.get("department")
+        group_name = target.get("group_name") or ""
+        group_id = target.get("group_id") or ""
+        message = target.get("message") or ""
+        is_draft = bool(_DRAFT_PATTERNS.search(text_clean))
+
         base = {
-            "department_id": department.id,
-            "department": department.name,
+            "department_id": department.id if department else None,
+            "department": target.get("department_name", ""),
             "group_name": group_name,
             "group_id": group_id,
+            "generic": bool(target.get("generic")),
             "source_user": user.name,
         }
 
-        if not group_id:
+        if not group_name:
             return AdminResult(
                 recognized=True,
                 intent="enviar_aviso_grupo",
-                reply=f"O departamento {department.name} ainda não possui um grupo WhatsApp vinculado.",
+                reply="Não identifiquei qual grupo devo avisar.",
                 action_data=base,
             )
 
-        if not check_department_scope(user, department.id, group_id):
+        # Sem grupo vinculado no cadastro: o executor real tentará achar o
+        # JID na lista REAL do WhatsApp pelo nome. Só avisa que "não achou"
+        # se essa busca real também falhar (tratado no backend de envio).
+
+        if department and not group_id and not target.get("generic"):
+            # Departamento reconhecido mas SEM grupo vinculado: não inventa destino.
+            if not _GROUP_REFERENCE_PATTERNS.search(text_clean) and not _extract_group_reference(text_clean):
+                return AdminResult(
+                    recognized=True,
+                    intent="enviar_aviso_grupo",
+                    reply=f"O departamento {department.name} ainda não possui um grupo WhatsApp vinculado.",
+                    action_data=base,
+                )
+
+        if not check_department_scope(user, department.id if department else None, group_id):
             return AdminResult(
                 recognized=True,
                 intent="enviar_aviso_grupo",
@@ -434,7 +535,6 @@ def analyze_admin_command(
                 action_data=base,
             )
 
-        is_draft = bool(_DRAFT_PATTERNS.search(text_clean))
         if not message:
             return AdminResult(
                 recognized=True,

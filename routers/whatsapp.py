@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
@@ -31,8 +31,21 @@ router = APIRouter(prefix="/api/whatsapp", tags=["whatsapp"])
 
 
 class GroupSendIn(BaseModel):
-    group_name: str = Field(default="", max_length=160)
-    group_id: str = Field(default="", max_length=120)
+    """Payload do teste de envio.
+
+    Aceita camelCase (groupId/groupName — usado pelo painel) E snake_case
+    (group_id/group_name), para não quebrar nenhum chamador existente.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    group_id: str = Field(
+        default="", max_length=120,
+        validation_alias=AliasChoices("groupId", "group_id"),
+    )
+    group_name: str = Field(
+        default="", max_length=160,
+        validation_alias=AliasChoices("groupName", "group_name"),
+    )
     message: str = Field(min_length=1, max_length=4000)
 
 
@@ -126,6 +139,11 @@ async def whatsapp_send_group(
     if not instance:
         raise HTTPException(status_code=400, detail="WhatsApp não conectado para esta igreja.")
 
+    logger.info(
+        "TESTE ENVIO RECEBIDO: {groupId=%r, groupName=%r, message=%r, church_id=%s, user=%s}",
+        data.group_id, data.group_name, data.message[:300], church.id, user.name,
+    )
+
     group_id = data.group_id.strip()
     group_name = data.group_name.strip()
 
@@ -133,7 +151,7 @@ async def whatsapp_send_group(
     if not group_name and not group_id:
         raise HTTPException(status_code=400, detail="Informe o grupo ou o nome do grupo.")
 
-    # Só com nome: resolve o JID real na lista do WhatsApp.
+    # Prioridade: groupId informado usa direto. Sem groupId, procura pelo nome.
     if not group_id:
         from services.group_send import resolve_group_target
 
@@ -145,6 +163,11 @@ async def whatsapp_send_group(
 
     if not group_id.endswith("@g.us"):
         raise HTTPException(status_code=400, detail="Endereço de grupo inválido.")
+
+    logger.info(
+        "TESTE ENVIO ALVO: {groupId=%r, groupName=%r} — executando envio real",
+        group_id, group_name,
+    )
 
     outcome = await execute_group_send(
         db, church.id,

@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal, get_db
-from models import Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
+from models import AdminAction, AuthorizedUser, Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
+from services.admin_commands import analyze_admin_command
 from services.phone import canonical as canonical_phone, only_digits, variants as phone_variants
 from services.safety import safe_send, get_church_safety
 
@@ -491,6 +492,45 @@ async def _process_message(log_id: int, instance_name: str):
         text = log.text or ""
         from_number = log.from_number
         media_key = log.media_key or None
+
+        # ── Secretária Inteligente: comandos administrativos via WhatsApp ──
+        if text and from_number and log.church_id:
+            try:
+                admin = analyze_admin_command(db, log.church_id, from_number, text)
+            except Exception:
+                admin = None
+            if admin and admin.recognized:
+                _add_step(log, "comando admin reconhecido", detail=admin.intent)
+                reply_jid = log.to_jid or f"{from_number}@s.whatsapp.net"
+                try:
+                    await safe_send(
+                        log.church_id or 1, reply_jid, admin.reply,
+                        instance=instance_name, message_id=f"admin:{log.id}",
+                    )
+                    _add_step(log, "resposta admin enviada", detail=admin.intent)
+                except evolution.EvolutionError as exc:
+                    logger.error("Falha ao responder admin %s: %s", from_number, exc)
+                    log.status = "routed_with_error"
+                    _add_step(log, "falha ao enviar resposta admin", status="error", detail=str(exc))
+                # Registra a ação no audit log
+                try:
+                    db.add(AdminAction(
+                        church_id=log.church_id,
+                        user_name=admin.action_data.get("user_name", ""),
+                        phone=from_number,
+                        raw_command=text[:500],
+                        intent=admin.intent,
+                        action=",".join(str(v) for v in admin.action_data.values() if v) if admin.action_data else "",
+                        status="confirmado" if not admin.needs_confirmation else "pendente_confirmacao",
+                    ))
+                except Exception:
+                    db.rollback()
+                db.commit()
+                log.department_name = "admin_whatsapp"
+                log.llm_reply = admin.reply
+                log.status = "routed"
+                db.commit()
+                return
 
         # Regras de encaminhamento ativas: assunto -> responsável. A IA decide
         # automaticamente quando usar (sem opções manuais no painel).

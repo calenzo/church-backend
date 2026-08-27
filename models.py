@@ -282,3 +282,65 @@ class SafetyLog(Base):
     event_type: Mapped[str] = mapped_column(String(40), default="info")
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AuthorizedUser(Base):
+    """Usuários autorizados a executar comandos administrativos via WhatsApp."""
+
+    __tablename__ = "authorized_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    phone: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active / blocked
+    profile: Mapped[str] = mapped_column(String(40), default="operador")  # administrador / secretaria / lider / operador / comunicador / instrutor
+    allowed_departments: Mapped[str] = mapped_column(Text, default="")  # JSON list of dept IDs
+    allowed_groups: Mapped[str] = mapped_column(Text, default="")  # JSON list of group JIDs
+    permissions: Mapped[str] = mapped_column(Text, default="")  # JSON list of permission keys
+    notes: Mapped[str] = mapped_column(Text, default="")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AdminAction(Base):
+    """Log de ações administrativas executadas via WhatsApp."""
+
+    __tablename__ = "admin_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("authorized_users.id"), nullable=True)
+    user_name: Mapped[str] = mapped_column(String(120), default="")
+    phone: Mapped[str] = mapped_column(String(20), default="")
+    raw_command: Mapped[str] = mapped_column(Text, default="")
+    intent: Mapped[str] = mapped_column(String(60), default="")
+    action: Mapped[str] = mapped_column(Text, default="")
+    target: Mapped[str] = mapped_column(Text, default="")
+    previous_value: Mapped[str] = mapped_column(Text, default="")
+    new_value: Mapped[str] = mapped_column(Text, default="")
+    department: Mapped[str] = mapped_column(String(120), default="")
+    group_jid: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(30), default="recebido")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ChurchKnowledge(Base):
+    """Informações ensinadas por usuários autorizados via WhatsApp."""
+
+    __tablename__ = "church_knowledge"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    church_id: Mapped[int] = mapped_column(ForeignKey("churches.id"), index=True)
+    category: Mapped[str] = mapped_column(String(40), default="institucional")
+    key_topic: Mapped[str] = mapped_column(String(200), default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    department: Mapped[str] = mapped_column(String(120), default="")
+    source_user: Mapped[str] = mapped_column(String(120), default="")
+    source_phone: Mapped[str] = mapped_column(String(20), default="")
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

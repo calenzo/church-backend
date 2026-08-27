@@ -11,6 +11,7 @@ Usado tanto pelos comandos de usuário autorizado (via conversa) quanto
 pela área de teste da aba Autorizados — mesma função real de envio.
 """
 
+import difflib
 import json
 import logging
 
@@ -20,6 +21,56 @@ from models import Department, GroupSendLog
 from services import evolution
 
 logger = logging.getLogger(__name__)
+
+# Origem do envio: WHATSAPP (comando via conversa da IA) ou PAINEL (área de teste).
+# Preserva alias legados (ia/teste) gravados antes da padronização.
+_ORIGIN_ALIAS = {"ia": "whatsapp", "teste": "painel"}
+
+# Artigos/partículas ignoradas na comparação do nome do grupo
+# ("estudo da bíblia rr" == "Estudo Bíblia RR"; "grupo de jovens" == "Jovens").
+_GROUP_PARTICLES = {
+    "de", "da", "do", "das", "dos", "e", "o", "a", "os", "as", "um", "uma",
+    "grupo", "grupos", "departamento",
+}
+_MATCH_THRESHOLD = 0.80  # mínimo para considerar uma correspondência clara
+_AMBIG_TOLERANCE = 0.06  # quão próximos dois grupos podem estar sem gerar ambiguidade
+
+
+def _normalize_origin(origin: str) -> str:
+    origin_norm = _ORIGIN_ALIAS.get((origin or "").lower(), (origin or "").lower())
+    if origin_norm not in ("whatsapp", "painel"):
+        origin_norm = "painel"
+    return origin_norm
+
+
+def _norm(value: str) -> str:
+    import unicodedata
+
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFD", (value or "").lower())
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def _norm_tokens(value: str) -> list[str]:
+    return [t for t in _norm(value).split() if t not in _GROUP_PARTICLES]
+
+
+def _token_match(a: str, b: str) -> tuple[bool, float, float]:
+    """Compara dois nomes de grupo ignorando caixa, acentos e partículas.
+
+    Retorna (exato, jaccard, ratio). 'exato' é True quando os tokens
+    significativos são idênticos."""
+    ta, tb = _norm_tokens(a), _norm_tokens(b)
+    if not ta or not tb:
+        return False, 0.0, 0.0
+    exact = ta == tb
+    inter = len({t for t in ta} & {t for t in tb})
+    union = len({t for t in ta} | {t for t in tb})
+    jaccard = inter / union if union else 0.0
+    ratio = difflib.SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio()
+    return exact, jaccard, ratio
 
 
 def _extract_message_id(resp: dict | None) -> str:
@@ -41,7 +92,7 @@ def create_send_log(
     group_name: str,
     group_id: str,
     message: str,
-    origin: str = "ia",
+    origin: str = "whatsapp",
 ) -> GroupSendLog:
     row = GroupSendLog(
         church_id=church_id,
@@ -51,7 +102,7 @@ def create_send_log(
         group_id=group_id[:120],
         message=message,
         status="pendente",
-        origin="ia" if origin not in ("teste", "ia") else origin,
+        origin=_normalize_origin(origin),
     )
     db.add(row)
     db.flush()
@@ -90,28 +141,25 @@ def list_send_logs(db: Session, church_id: int, origin: str = "", limit: int = 5
     ]
 
 
-def _norm(value: str) -> str:
-    import unicodedata
-
-    return "".join(
-        ch
-        for ch in unicodedata.normalize("NFD", (value or "").lower())
-        if unicodedata.category(ch) != "Mn"
-    )
-
-
 async def resolve_group_target(
     db: Session,
     church_id: int,
     group_name: str,
     instance: str | None = None,
 ) -> dict | None:
-    """Localiza o grupo WhatsApp real pelo nome.
+    """Localiza o grupo WhatsApp REAL pelo nome informado.
 
-    1. Tenta o vínculo cadastrado no departamento (nome ou grupo vinculado);
-    2. Senão, consulta a lista REAL de grupos do WhatsApp e casa pelo nome.
-    Retorna {"name": ..., "group_id": ...} ou None se não encontrar.
-    NUNCA inventa um vínculo: se não encontrar, retorna None."""
+    Retorna:
+      {"name":..., "group_id":..., "source":"departamento"|"whatsapp"}  -> match único e claro
+      {"ambiguous": True, "names": [grupos semelhantes]}                -> não queira arriscar envio
+      None                                                              -> não encontrado
+
+    Regras de correspondência (na lista real do WhatsApp):
+      - ignora caixa e acentos;
+      - ignora partículas (de/da/do/e...) — "estudo da bíblia rr" casa com "Estudo Bíblia RR";
+      - aceita pequenas variações apenas com correspondência MUITO clara (score >= 0.80);
+      - se dois grupos ficarem próximos ao mesmo tempo -> NUNCA envia: devolve ambíguo.
+    O vínculo cadastrado no departamento tem prioridade e dispensa listagem."""
     wanted = _norm(group_name)
     if not wanted:
         return None
@@ -135,16 +183,35 @@ async def resolve_group_target(
             continue
         break
 
-    # Busca na lista REAL de grupos do WhatsApp.
     try:
         groups = await evolution.list_groups(instance=instance, force_refresh=False)
     except Exception:
         groups = []
+
+    scored: list[tuple[float, str, str]] = []
     for g in groups:
         subject = (g.get("subject") or "").strip()
-        if subject and _norm(subject) == wanted:
-            return {"name": subject, "group_id": g.get("id") or "", "source": "whatsapp"}
-    return None
+        if not subject:
+            continue
+        exact, jaccard, ratio = _token_match(subject, group_name)
+        score = 1.0 if exact else max(jaccard, ratio)
+        if score >= _MATCH_THRESHOLD:
+            scored.append((score, g.get("id") or "", subject))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: (-item[0], item[2].lower()))
+    top_score = scored[0][0]
+    best = [item for item in scored if top_score - item[0] <= _AMBIG_TOLERANCE]
+    if len(best) > 1:
+        return {"ambiguous": True, "names": sorted({item[2] for item in best})}
+    return {
+        "name": best[0][2],
+        "group_id": best[0][1],
+        "source": "whatsapp",
+        "score": round(top_score, 3),
+    }
 
 
 async def execute_group_send(
@@ -157,7 +224,7 @@ async def execute_group_send(
     instance: str,
     user_name: str,
     phone: str,
-    origin: str = "ia",
+    origin: str = "whatsapp",
     dedup_key: str = "",
 ) -> dict:
     """Executa o envio REAL para o grupo, registrando o status.

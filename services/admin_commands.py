@@ -156,19 +156,20 @@ _MAX_TARGET_DISTANCE = 60
 _GROUP_CLAIM_RE = re.compile(
     r"(?:para\s+(?:o|a)\s+)?(?:no\s+)?(?:grupo|group|departamento)"
     r"\s*(?:de|do|da|dos|das)?\s*:?\s*"
-    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*)"
-    r"(?:\s+(?!(?:que|para|sobre)\b)[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*){0,7}"
+    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*"
+    r"(?:\s+(?!(?:que|para|sobre)\b)[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*){0,7})"
     r"(?=\s*(?::\s*|,\s*|que\b|para\b|sobre\b|$))",
     re.IGNORECASE,
 )
 
-# Consulta ao status real do último envio ("Já enviou?", "Foi enviado?", ...).
+# Consulta ao status real do último envio ("Já enviou?", "Foi?", "Mandou?", "Deu certo?").
 _SEND_STATUS_QUERY_PATTERNS = re.compile(
-    r"(^(já|ja)\s+(?:foi\s+)?(enviou|mandou|enviad[oa])|"
-    r"^(foi\s+(enviado|mandado|enviada))|"
-    r"(o\s+aviso\s+foi|o\s+envio\s*foi|deu\s+certo\s+o\s+envio|deu\s+certo\s+pra\s+enviar)|"
-    r"chegou\s+(no\s+grupo|nos\s+grupos)|e\s+o\s+aviso|"
-    r"enviou\?$|mandou\?$|enviad[oa]\?$)",
+    r"(^(foi\?|foi\s+m[ée]smo\?|deu\s+certo\?|deu\s+certo\s+o\s+envio\?|"
+    r"mandou\?|enviou\?|enviad[oa]\?)|"
+    r"(já|ja)\s+(?:foi\s+)?(enviou|mandou|enviad[oa]|mandado)|"
+    r"(foi\s+(enviado|mandado|enviada))|"
+    r"(o\s+aviso\s+foi|o\s+envio\s*foi|deu\s+certo+o\s+envio)|"
+    r"chegou\s+(no\s+grupo|nos\s+grupos)|e\s+o\s+aviso)",
     re.IGNORECASE,
 )
 

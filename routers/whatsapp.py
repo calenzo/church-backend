@@ -156,6 +156,13 @@ async def whatsapp_send_group(
         from services.group_send import resolve_group_target
 
         hit = await resolve_group_target(db, church.id, group_name.strip(), instance=instance)
+        if hit and hit.get("ambiguous"):
+            raise HTTPException(
+                status_code=404,
+                detail="Encontrei grupos semelhantes: "
+                + ", ".join(hit["names"])
+                + ". Informe o nome exato do grupo.",
+            )
         if not hit or not hit.get("group_id"):
             raise HTTPException(status_code=404, detail=f"Não encontrei o grupo {group_name}.")
         group_id = hit["group_id"]
@@ -177,7 +184,7 @@ async def whatsapp_send_group(
         instance=instance,
         user_name=user.name or "Painel",
         phone="",
-        origin="teste",
+        origin="painel",
     )
     return {
         "success": outcome["ok"],
@@ -192,7 +199,7 @@ async def whatsapp_send_group(
 
 @router.get("/logs", response_model=list[dict])
 async def whatsapp_logs(
-    origin: str = Query(default="teste"),
+    origin: str = Query(default="painel"),
     limit: int = Query(default=30, ge=1, le=200),
     church_id: int | None = None,
     user: User = Depends(get_current_user),

@@ -73,6 +73,29 @@ def _is_audio(data: dict) -> bool:
     return bool(msg.get("audioMessage") or msg.get("ptvMessage") or msg.get("voiceMessage"))
 
 
+def _is_forward_or_quote(data: dict) -> bool:
+    """Identifica mensagens ENCAMINHADAS ou que apenas CITAM outra mensagem.
+
+    Segurança: comandos administrativos só são executados quando o texto foi
+    REALMENTE digitado pelo usuário autorizado — nunca a partir de texto
+    encaminhado ou citado por terceiros."""
+    msg = data.get("message") or {}
+    if not isinstance(msg, dict):
+        return False
+    ctx: dict = {}
+    for value in msg.values():
+        if isinstance(value, dict) and isinstance(value.get("contextInfo"), dict):
+            ctx = value["contextInfo"]
+            break
+    if not ctx:
+        return False
+    if ctx.get("quotedMessage"):
+        return True
+    if int(ctx.get("forwardingScore") or 0) > 0 or bool(ctx.get("isForwarded")):
+        return True
+    return False
+
+
 def _normalize_jid(jid: str) -> str:
     return jid.split("@")[0] if "@" in jid else jid
 
@@ -472,8 +495,9 @@ def _load_history(db: Session, from_number: str, church_id: int | None, exclude_
     return history
 
 
-async def _process_message(log_id: int, instance_name: str):
-    """Processa a mensagem em segundo plano, atualizando o log (steps) a cada etapa."""
+async def _process_message(log_id: int, instance_name: str, skip_admin: bool = False):
+    """Processa a mensagem em segundo plano, atualizando o log (steps) a cada etapa.
+    skip_admin=True -> mensagem encaminhada/citação: comandos administrativos NÃO executam."""
     db = SessionLocal()
     try:
         log = db.get(MessageLog, log_id)
@@ -495,7 +519,12 @@ async def _process_message(log_id: int, instance_name: str):
         media_key = log.media_key or None
 
         # ── Secretária Inteligente: comandos administrativos via WhatsApp ──
-        if text and from_number and log.church_id:
+        if skip_admin:
+            _add_step(
+                log, "encaminhada ou citacao: comandos administrativos ignorados",
+                status="warn",
+            )
+        if text and from_number and log.church_id and not skip_admin:
             try:
                 admin = analyze_admin_command(db, log.church_id, from_number, text)
             except Exception:
@@ -513,9 +542,9 @@ async def _process_message(log_id: int, instance_name: str):
                     if last is None:
                         final_reply = "Não há envios recentes registrados."
                     elif last.status == "enviado":
-                        final_reply = f"Sim. O aviso foi enviado para o grupo {last.group_name}."
+                        final_reply = f"Sim. A mensagem foi enviada para {last.group_name}."
                     elif last.status == "erro":
-                        final_reply = "Não. A tentativa de envio apresentou erro."
+                        final_reply = "Não. O envio apresentou erro."
                     else:
                         final_reply = "O envio ainda está sendo processado."
                     send_result = "status_reply"
@@ -548,13 +577,23 @@ async def _process_message(log_id: int, instance_name: str):
                             group_name = hit["name"] or group_name
                             if not admin.action_data.get("group_id"):
                                 admin.action_data["group_id"] = group_id
+                        elif hit and hit.get("ambiguous"):
+                            final_reply = (
+                                "Encontrei grupos semelhantes: "
+                                + ", ".join(hit["names"])
+                                + ". Informe o nome exato do grupo para eu não errar o envio."
+                            )
+                            send_result = "ambiguous"
+                            _add_step(log, "grupo ambiguo: envio cancelado", detail=", ".join(hit["names"])[:120])
+                            admin.action_data["ambiguous"] = True
 
                     if not group_id:
-                        final_reply = f"Não encontrei o grupo {group_name}."
-                        send_result = "not_found"
+                        if send_result != "ambiguous":
+                            final_reply = f"Não encontrei o grupo {group_name}."
+                            send_result = "not_found"
                         logger.info(
                             "[COMMAND] enviar_mensagem_grupo [AUTHORIZED_USER] true "
-                            "[GROUP_NAME] %s [RESULT] grupo não encontrado", group_name,
+                            "[GROUP_NAME] %s [RESULT] %s", group_name, send_result,
                         )
                     else:
                         outcome = await execute_group_send(
@@ -565,22 +604,22 @@ async def _process_message(log_id: int, instance_name: str):
                             instance=instance_name,
                             user_name=user_name,
                             phone=from_number,
-                            origin="ia",
+                            origin="whatsapp",
                             dedup_key=f"admin-group:{log.id}",
                         )
                         executed = True
                         send_result = outcome["status"]
                         if outcome["ok"]:
-                            final_reply = f"Aviso enviado para o grupo {group_name}."
+                            final_reply = f"Mensagem enviada para {group_name}."
                         else:
-                            final_reply = f"Não consegui enviar o aviso para o grupo {group_name}."
+                            final_reply = f"Não consegui enviar a mensagem para {group_name}."
                             if outcome.get("error"):
                                 log.error = (log.error or "") + f" | enviar_mensagem_grupo: {outcome['error']}"
                             if outcome["status"] == "erro":
                                 log.status = "routed_with_error"
                         logger.info(
                             "[COMMAND] enviar_mensagem_grupo [AUTHORIZED_USER] true "
-                            "[DEPARTMENT] %s [GROUP_ID] %s [MESSAGE] %s [SEND_RESULT] %s",
+                            "[DEPARTMENT] %s [GROUP_ID] %s [ORIGEM] whatsapp [MESSAGE] %s [SEND_RESULT] %s",
                             dept_name or "?", group_id, message, send_result,
                         )
                     _add_step(log, f"envio ao grupo: {send_result}", detail=group_id[:40] or group_name[:40])
@@ -1007,6 +1046,7 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
         return {"ok": True, "skipped": "duplicate"}
 
     text = _extract_text(data)
+    skip_admin = _is_forward_or_quote(data)
     media_key = None
     is_audio = _is_audio(data)
     if is_audio:
@@ -1078,7 +1118,7 @@ async def evolution_webhook(request: Request, x_token: str | None = Header(defau
 
     # Processa em segundo plano para responder 200 imediatamente
     # (a Evolution espera resposta em até 60s; áudio/transcrição podem demorar mais).
-    task = asyncio.create_task(_process_message(log.id, instance_name))
+    task = asyncio.create_task(_process_message(log.id, instance_name, skip_admin=skip_admin))
     task.add_done_callback(lambda t: logger.error("Background task failed: %s", t.exception()) if t.exception() else None)
 
     return {"ok": True, "processing": True}

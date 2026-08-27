@@ -8,11 +8,12 @@ A IA NÃO modifica o banco diretamente — gera intents que o backend valida.
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from models import AuthorizedUser
+from models import AuthorizedUser, Department
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +122,21 @@ _CORRECT_PATTERNS = re.compile(
 )
 
 _NOTIFY_GROUP_PATTERNS = re.compile(
-    r"(avise|avis[ae]|envie|manda|envia|comunique|informe|comunica).*(grupo|group|equipe|time|lideranças?|irmãs?|irmãos?|jovens?|crianças?|mulheres?|homens?|adultos?|escola bíblica|ebd|oração|intercessão)",
+    r"(avise|avis[ae]|manda|mand[ae]|mande|envie|envia|enviar|coloque|coloca|comunique|informe|informa|comunica|publique|publica|posta|poste)\b",
     re.IGNORECASE,
 )
+
+# Palavras que indicam referência explícita a um grupo/departamento.
+_GROUP_REFERENCE_PATTERNS = re.compile(
+    r"(grupo|group|departamento)",
+    re.IGNORECASE,
+)
+
+# Separa a menção do alvo ("que", "para", ":", ",") do conteúdo da mensagem.
+_MESSAGE_SEP_RE = re.compile(r"^\s*(?:que\s*|para\s*|:\s*|,\s*)+", re.IGNORECASE)
+
+# Intervalos de busca do nome do departamento: não muito longe do verbo de envio.
+_MAX_TARGET_DISTANCE = 60
 
 _SCHEDULE_PATTERNS = re.compile(
     r"(agende|agendar|lembrete para|avise.* às|avise.* amanhã|avise.* segunda|avise.* terça|avise.* quarta|avise.* quinta|avise.* sexta|avise.* sábado|avise.* domingo)",
@@ -189,6 +202,114 @@ _WHAT_CHANGED_PATTERNS = re.compile(
     r"(o que mudou|o que foi alterado|quais ações|histórico de alterações|resumo de alterações)",
     re.IGNORECASE,
 )
+
+
+# ── Resolução de departamento / grupo WhatsApp ──────────────────────
+
+def _strip_accents(value: str) -> str:
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFD", value.lower())
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def _name_variants(name: str) -> set[str]:
+    """Variações do nome do departamento: com/sem plural, sem acentos."""
+    n = _strip_accents(name or "")
+    out = {n}
+    if n.endswith("s"):
+        out.add(n[:-1])
+    else:
+        out.add(n + "s")
+    return out
+
+
+def check_department_scope(user: AuthorizedUser, department_id: int | None, group_jid: str) -> bool:
+    """Verifica se o usuário tem permissão para o departamento/grupo pedido.
+    Escopos vazios (sem restrição cadastrada) liberam todos os departamentos."""
+    depts = _parse_permissions(user.allowed_departments)
+    if depts:
+        if department_id is None:
+            return False
+        try:
+            allowed_ids = {int(x) for x in depts}
+        except (TypeError, ValueError):
+            return False
+        if int(department_id) not in allowed_ids:
+            return False
+    groups = _parse_permissions(user.allowed_groups)
+    if groups:
+        if not group_jid or group_jid not in {str(g) for g in groups}:
+            return False
+    return True
+
+
+_ACCENT_CLASSES = {
+    "a": "[aáàâã]",
+    "e": "[eéê]",
+    "i": "[ií]",
+    "o": "[oóôõ]",
+    "u": "[uúü]",
+    "c": "[cç]",
+    "n": "[nñ]",
+}
+
+
+def _accent_regex(name: str) -> str:
+    """Constrói um regex com acentos flexíveis a partir de um nome."""
+    out = []
+    for ch in _strip_accents(name):
+        out.append(_ACCENT_CLASSES.get(ch, re.escape(ch)))
+    return "".join(out)
+
+
+def _resolve_send_target(db: Session, church_id: int, text: str):
+    """Encontra o departamento citado na mensagem e o grupo WhatsApp vinculado.
+
+    Retorna (department, group_name, group_id, message, mention_index) ou None.
+    A mensagem é o trecho após a menção do departamento (removendo 'que', 'para', ':').
+    Nunca inventa vínculo: usa exclusivamente o cadastro de Departamentos."""
+    if not (text or "").strip():
+        return None
+    verb = _NOTIFY_GROUP_PATTERNS.search(text)
+    if not verb:
+        return None
+    verb_end = verb.end()
+
+    depts = (
+        db.query(Department)
+        .filter(Department.church_id == church_id, Department.active == True)  # noqa: E712
+        .all()
+    )
+    best = None  # (score, department, start, end)
+    for d in depts:
+        candidates = []
+        if (d.group_name or "").strip():
+            candidates.append(d.group_name)
+        candidates.append(d.name)
+        for raw in candidates:
+            for variant in _name_variants(raw):
+                if len(_strip_accents(variant)) < 2:
+                    continue
+                pattern = re.compile(_accent_regex(variant), re.IGNORECASE)
+                for m in pattern.finditer(text):
+                    idx = m.start()
+                    if idx < verb_end or idx - verb_end > _MAX_TARGET_DISTANCE:
+                        continue
+                    score = m.end() - m.start()
+                    before = text[max(0, idx - 28):idx].lower()
+                    if re.search(r"(grupo de |grupo do |grupo |departamento de |departamento do |no grupo |no departamento )$", before):
+                        score += 18
+                    if best is None or score > best[0] or (score == best[0] and idx < best[2]):
+                        best = (score, d, m.start(), m.end())
+
+    if best is None:
+        return None
+    _, department, start, end = best
+    rest = text[end:]
+    message = _MESSAGE_SEP_RE.sub("", rest).strip().rstrip(".!")
+    return (department, department.group_name or department.name, department.group_jid, message, start)
 
 
 # ── Função principal ─────────────────────────────────────────────────
@@ -264,33 +385,80 @@ def analyze_admin_command(
             action_data={"raw": text_clean},
         )
 
-    # ── "Avise o grupo..." ──────────────────────────────────────────
+    # ── "Avise o grupo X que Y" ─────────────────────────────────────
     if _NOTIFY_GROUP_PATTERNS.search(text_clean):
         if not check_permission(user, "enviar_avisos"):
             return AdminResult(
                 recognized=True,
-                intent="enviar_aviso",
+                intent="enviar_aviso_grupo",
                 permission_needed="enviar_avisos",
                 reply="Você não tem permissão para enviar avisos.",
             )
+        target = _resolve_send_target(db, church_id, text_clean)
+        if target is None:
+            if _GROUP_REFERENCE_PATTERNS.search(text_clean):
+                return AdminResult(
+                    recognized=True,
+                    intent="enviar_aviso_grupo",
+                    reply=(
+                        "Para qual grupo devo enviar? Diga o departamento ou o nome do grupo. "
+                        'Ex.: "Avise o grupo de Jovens que amanhã tem ensaio."'
+                    ),
+                    action_data={"source_user": user.name},
+                )
+            # Sem menção clara de um grupo/departamento: segue o fluxo normal da IA.
+            return AdminResult(recognized=False)
+
+        department, group_name, group_id, message, _ = target
+        base = {
+            "department_id": department.id,
+            "department": department.name,
+            "group_name": group_name,
+            "group_id": group_id,
+            "source_user": user.name,
+        }
+
+        if not group_id:
+            return AdminResult(
+                recognized=True,
+                intent="enviar_aviso_grupo",
+                reply=f"O departamento {department.name} ainda não possui um grupo WhatsApp vinculado.",
+                action_data=base,
+            )
+
+        if not check_department_scope(user, department.id, group_id):
+            return AdminResult(
+                recognized=True,
+                intent="enviar_aviso_grupo",
+                reply=f"Você não tem permissão para enviar avisos ao grupo {group_name}.",
+                action_data=base,
+            )
+
         is_draft = bool(_DRAFT_PATTERNS.search(text_clean))
-        is_exact = bool(_EXACT_SEND_PATTERNS.search(text_clean))
-        is_improve = bool(_IMPROVE_SEND_PATTERNS.search(text_clean))
+        if not message:
+            return AdminResult(
+                recognized=True,
+                intent="enviar_aviso_grupo",
+                reply=f"Qual a mensagem que devo enviar para o grupo \"{group_name}\"?",
+                action_data=base,
+            )
+
+        base["message"] = message
+        base["draft_only"] = is_draft
+        preview = message if len(message) <= 160 else message[:157] + "..."
+        if is_draft:
+            return AdminResult(
+                recognized=True,
+                intent="enviar_aviso_grupo",
+                reply=f"Rascunho pronto para o grupo \"{group_name}\":\n\n\"{preview}\"\n\nMande \"envia\" quando quiser que eu envie.",
+                action_data=base,
+            )
         return AdminResult(
             recognized=True,
-            intent="enviar_aviso",
-            needs_confirmation=not is_draft,
-            reply=(
-                "Vou preparar o aviso. Qual grupo exatamente devo enviar?"
-                if not is_draft
-                else "Rascunho pronto. Quer que eu envie ou prefere revisar?"
-            ),
-            action_data={
-                "raw": text_clean,
-                "draft_only": is_draft,
-                "exact_text": is_exact,
-                "improve_before": is_improve,
-            },
+            intent="enviar_aviso_grupo",
+            needs_confirmation=is_draft,
+            reply=f"Enviando para o grupo \"{group_name}\".",
+            action_data=base,
         )
 
     # ── "Amanhã às cinco avise..." (agendamento) ────────────────────

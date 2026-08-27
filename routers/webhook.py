@@ -498,14 +498,66 @@ async def _process_message(log_id: int, instance_name: str):
             try:
                 admin = analyze_admin_command(db, log.church_id, from_number, text)
             except Exception:
+                logger.exception("Erro ao analisar comando admin de %s", from_number)
                 admin = None
             if admin and admin.recognized:
                 _add_step(log, "comando admin reconhecido", detail=admin.intent)
                 reply_jid = log.to_jid or f"{from_number}@s.whatsapp.net"
+                final_reply = admin.reply
+                send_result = "none"
+
+                # Ação real: enviar aviso ao grupo WhatsApp vinculado ao departamento.
+                # Só informa sucesso após o retorno real da API/WhatsApp.
+                targets_group = (
+                    admin.intent == "enviar_aviso_grupo"
+                    and bool(admin.action_data.get("message"))
+                    and bool(admin.action_data.get("group_id"))
+                    and not admin.action_data.get("draft_only")
+                )
+                if targets_group:
+                    group_id = admin.action_data["group_id"]
+                    group_name = (
+                        admin.action_data.get("group_name")
+                        or admin.action_data.get("department")
+                        or "grupo"
+                    )
+                    message = admin.action_data["message"]
+                    dept_name = admin.action_data.get("department", "")
+                    try:
+                        result = await safe_send(
+                            log.church_id or 1,
+                            group_id,
+                            message,
+                            instance=instance_name,
+                            message_id=f"admin-group:{log.id}",
+                            is_reply=False,
+                        )
+                        if result.get("ok"):
+                            send_result = "success"
+                            final_reply = f"Aviso enviado ao grupo {group_name}."
+                        else:
+                            send_result = result.get("status", "error")
+                            final_reply = f"Não consegui enviar o aviso ao grupo {group_name}."
+                            detail = result.get("detail", "")
+                            if detail:
+                                log.error = (log.error or "") + f" | enviar_aviso_grupo: {detail}"
+                    except evolution.EvolutionError as exc:
+                        send_result = "error"
+                        final_reply = f"Não consegui enviar o aviso ao grupo {group_name}."
+                        log.error = (log.error or "") + f" | enviar_aviso_grupo: {exc}"
+                        log.status = "routed_with_error"
+                        logger.error("Falha ao enviar aviso ao grupo %s: %s", group_id, exc)
+                    logger.info(
+                        "[COMMAND] enviar_aviso_grupo [AUTHORIZED_USER] true "
+                        "[DEPARTMENT] %s [GROUP_ID] %s [MESSAGE] %s [SEND_RESULT] %s",
+                        dept_name or "?", group_id, message, send_result,
+                    )
+                    _add_step(log, f"envio ao grupo: {send_result}", detail=group_id[:40])
+
                 try:
                     await safe_send(
-                        log.church_id or 1, reply_jid, admin.reply,
-                        instance=instance_name, message_id=f"admin:{log.id}",
+                        log.church_id or 1, reply_jid, final_reply,
+                        instance=instance_name, message_id=f"admin-reply:{log.id}",
                     )
                     _add_step(log, "resposta admin enviada", detail=admin.intent)
                 except evolution.EvolutionError as exc:
@@ -516,18 +568,21 @@ async def _process_message(log_id: int, instance_name: str):
                 try:
                     db.add(AdminAction(
                         church_id=log.church_id,
-                        user_name=admin.action_data.get("user_name", ""),
+                        user_name=admin.action_data.get("source_user", ""),
                         phone=from_number,
                         raw_command=text[:500],
                         intent=admin.intent,
-                        action=",".join(str(v) for v in admin.action_data.values() if v) if admin.action_data else "",
-                        status="confirmado" if not admin.needs_confirmation else "pendente_confirmacao",
+                        action=f"status={send_result}",
+                        target=admin.action_data.get("group_id", ""),
+                        department=admin.action_data.get("department", ""),
+                        new_value=admin.action_data.get("message", ""),
+                        status="executado" if targets_group else "recebido",
                     ))
                 except Exception:
                     db.rollback()
                 db.commit()
                 log.department_name = "admin_whatsapp"
-                log.llm_reply = admin.reply
+                log.llm_reply = final_reply
                 log.status = "routed"
                 db.commit()
                 return

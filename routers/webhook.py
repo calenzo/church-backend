@@ -96,6 +96,47 @@ def _is_forward_or_quote(data: dict) -> bool:
     return False
 
 
+# ── Felicitações dirigidas a OUTRA pessoa do grupo (a IA não responde) ──
+# "Parabéns minha linda", "Felicidades minha irmã", "Deus abençoe sua vida"...
+# A IA não deve agir como se aniversário/felicitação fosse para ela.
+_CELEBRATION_PATTERNS = re.compile(
+    r"(parab[eé]n\w*|felicidades?\b|feliz\s+anivers[aá]rio|"
+    r"muit[oa]s?\s+anos\s+de\s+vida|deus\s+aben[cç]o[eé]\b|"
+    r"muitas?\s+felicidades|sa[uú]de\s+e\s+paz|anivers[aá]ri[oa]s?\s+d\w*\b|"
+    r"[🎂🎁🎈🎉🎊🍰💐🌹])",
+    re.IGNORECASE,
+)
+
+# … mas se a mensagem é dirigida À IA ("pra você", "secretária"…), ela agradece.
+_CELEBRATION_DIRECTED_TO_AI = re.compile(
+    r"(pra\s+(voc[eê]|vc)\b|para\s+(voc[eê]|vc)\b|p\s*/\s*voc\b|secret[aá]ri\w*|"
+    r"assistente\b|para\s+mim\b|pra\s+mim\b|nossa\s+ia\b|whatsapp\s+da\s+igrej)",
+    re.IGNORECASE,
+)
+
+# … e também não cala mensagens com pergunta/pedido ("qual o horário?"…).
+_CELEBRATION_BUSINESS = re.compile(
+    r"(\?|qual\b|quando\b|onde\b|quem\b|o\s+que\b|pode\b|avise\b|mand\w\b|enviar?\b|"
+    r"quero\b|preciso\b|hor[aá]rio\b|ensaio\b|escala\b|culto\b|reuni[aã]o\b|anivers[iá]nte)",
+    re.IGNORECASE,
+)
+
+
+def _is_third_party_celebration(text: str) -> bool:
+    """True quando a mensagem é só uma felicitação de UMA pessoa para OUTRA
+    (parabéns, aniversário, benção…), e não um pedido à IA."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if not _CELEBRATION_PATTERNS.search(t):
+        return False
+    if _CELEBRATION_DIRECTED_TO_AI.search(t):
+        return False
+    if _CELEBRATION_BUSINESS.search(t):
+        return False
+    return True
+
+
 def _normalize_jid(jid: str) -> str:
     return jid.split("@")[0] if "@" in jid else jid
 
@@ -677,6 +718,14 @@ async def _process_message(log_id: int, instance_name: str, skip_admin: bool = F
             linked = [d for d in departments if d["group_jid"] == log.to_jid]
             if linked:
                 scope_departments = linked
+
+        # Felicitação de uma pessoa para OUTRA no grupo ("Parabéns minha linda",
+        # "Felicidades minha irmã", aniversário da irmã…): a IA fica calada.
+        if reply_in_group and _is_third_party_celebration(text):
+            _add_step(log, "felicitacao dirigida a outra pessoa: sem resposta", status="warn")
+            log.status = "ignored"
+            db.commit()
+            return
 
         try:
             if media_key:

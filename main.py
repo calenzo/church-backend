@@ -13,6 +13,7 @@ from routers import authorized, board, membros, safety, webhook, whatsapp
 from services import evolution as evolution_service
 from services.birthday_scheduler import run_loop as birthday_loop
 from services.birthday_seed import seed_birthday_data
+from services.connection_watch import run_loop as connection_watch_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,9 +104,11 @@ async def lifespan(app: FastAPI):
     _seed_multi_tenant()
     seed_birthday_data()  # carga inicial de membros: uma única vez por igreja
     birthday_task = asyncio.create_task(birthday_loop())
+    connection_task = asyncio.create_task(connection_watch_loop())
     logger.info("Backend iniciado com sucesso")
     yield
     birthday_task.cancel()
+    connection_task.cancel()
     logger.info("Backend desligando (SIGTERM recebido)")
     engine.dispose()
     evolution_service.invalidate_groups_cache()

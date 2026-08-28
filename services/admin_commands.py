@@ -132,8 +132,8 @@ _GROUP_REFERENCE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Separa a menção do alvo ("que", "para", ":", ",") do conteúdo da mensagem.
-_MESSAGE_SEP_RE = re.compile(r"^\s*(?:que\s*|para\s*|:\s*|,\s*)+", re.IGNORECASE)
+# Separa a menção do alvo ("que", "para", "sobre", ":", ",") do conteúdo da mensagem.
+_MESSAGE_SEP_RE = re.compile(r"^\s*(?:que\s*|para\s*|sobre\s*|:\s*|,\s*)+", re.IGNORECASE)
 
 
 def _message_after(rest: str) -> str:
@@ -161,6 +161,32 @@ _GROUP_CLAIM_RE = re.compile(
     r"(?=\s*(?::\s*|,\s*|que\b|para\b|sobre\b|$))",
     re.IGNORECASE,
 )
+
+# Captura do alvo citado SEM a palavra "grupo":
+#   "Enviar para Estudo Bíblia RR: ..." / "Avise Contatos da Igreja que ..."
+# Usada como fallback quando nenhum departamento casa com o texto.
+_PARATARGET_CLAIM_RE = re.compile(
+    r"(?:^|\s)para\s+(?:o|a|os|as)?\s*"
+    r"([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*"
+    r"(?:\s+(?!\bque\b)[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*){0,7})"
+    r"(?=\s*(?::\s*|,\s*|que\b|$))",
+    re.IGNORECASE,
+)
+
+# Nome logo após o verbo (antes de "que"/":"): "Avise Contatos da Igreja que ..."
+_DIRECTTARGET_CLAIM_RE = re.compile(
+    r"(?:^|\s)([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*"
+    r"(?:\s+(?!\bque\b)[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\-]*){0,7})"
+    r"(?=\s*(?:que\b|:))",
+    re.IGNORECASE,
+)
+
+# Palavras que nunca iniciam o nome de um grupo (evita capturas erradas).
+_GROUP_NAME_FIRST_BLACKLIST = {
+    "que", "para", "sobre", "com", "sendo", "amanha", "hoje", "agora", "depois",
+    "o", "a", "os", "as", "nao", "na", "no", "se", "entao", "de", "do", "da",
+    "dos", "das", "um", "uma", "vai", "tem", "haver",
+}
 
 # Consulta ao status real do último envio ("Já enviou?", "Foi?", "Mandou?", "Deu certo?").
 _SEND_STATUS_QUERY_PATTERNS = re.compile(
@@ -300,17 +326,24 @@ def _accent_regex(name: str) -> str:
 
 
 def _extract_group_reference(text: str):
-    """Captura genérica do grupo citado na frase ('o grupo Contatos da Igreja').
+    """Captura genérica do grupo/departamento citado na frase.
 
-    Retorna (nome, posição final da menção) ou None.
-    Usado como fallback quando nenhum departamento casa com o texto."""
-    m = _GROUP_CLAIM_RE.search(text or "")
-    if not m:
-        return None
-    name = m.group(1).strip()
-    if len(name) < 2:
-        return None
-    return name, m.end()
+    Tenta, em ordem:
+      1. 'o grupo X ...' / 'no grupo de X ...'  (_GROUP_CLAIM_RE);
+      2. 'Enviar para X: ...' / 'Manda para X ...'  (_PARATARGET_CLAIM_RE);
+      3. 'Avise X que ...' (nome logo após o verbo)  (_DIRECTTARGET_CLAIM_RE).
+
+    Retorna (nome, posição final da menção) ou None."""
+    for pattern in (_GROUP_CLAIM_RE, _PARATARGET_CLAIM_RE, _DIRECTTARGET_CLAIM_RE):
+        m = pattern.search(text or "")
+        if not m:
+            continue
+        name = m.group(1).strip()
+        first = _strip_accents(name.split()[0]) if name.split() else ""
+        if len(name) < 2 or first in _GROUP_NAME_FIRST_BLACKLIST:
+            continue
+        return name, m.end()
+    return None
 
 
 def _resolve_send_target(db: Session, church_id: int, text: str):
@@ -515,18 +548,9 @@ def analyze_admin_command(
             )
 
         # Sem grupo vinculado no cadastro: o executor real tentará achar o
-        # JID na lista REAL do WhatsApp pelo nome. Só avisa que "não achou"
-        # se essa busca real também falhar (tratado no backend de envio).
-
-        if department and not group_id and not target.get("generic"):
-            # Departamento reconhecido mas SEM grupo vinculado: não inventa destino.
-            if not _GROUP_REFERENCE_PATTERNS.search(text_clean) and not _extract_group_reference(text_clean):
-                return AdminResult(
-                    recognized=True,
-                    intent="enviar_aviso_grupo",
-                    reply=f"O departamento {department.name} ainda não possui um grupo WhatsApp vinculado.",
-                    action_data=base,
-                )
+        # JID na lista REAL do WhatsApp pelo nome (mesmo fluxo do painel).
+        # Só avisa que "não achou" se essa busca real também falhar
+        # (tratado no backend de envio).
 
         if not check_department_scope(user, department.id if department else None, group_id):
             return AdminResult(

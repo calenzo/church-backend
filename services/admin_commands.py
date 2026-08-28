@@ -431,16 +431,25 @@ def analyze_admin_command(
     Retorna AdminResult com intent, dados da ação e resposta.
     """
     phone_digits = "".join(c for c in sender_phone if c.isdigit())
+    # O WhatsApp entrega o remetente com DDI (552199...), mas a aba Autorizados
+    # pode ter gravado sem (2199...). Varre todas as equivalências (com/sem 55).
+    from services.phone import variants as phone_variants
+
+    phone_candidates = phone_variants(phone_digits) or [phone_digits]
     user = (
         db.query(AuthorizedUser)
         .filter(
             AuthorizedUser.church_id == church_id,
-            AuthorizedUser.phone == phone_digits,
+            AuthorizedUser.phone.in_(phone_candidates),
             AuthorizedUser.status == "active",
         )
         .first()
     )
     if not user:
+        logger.info(
+            "[ADMIN] remetente %s não autorizado (candidatos: %s)",
+            phone_digits, phone_candidates,
+        )
         return AdminResult(recognized=False)
 
     text_clean = text.strip()

@@ -12,6 +12,7 @@ from database import get_db
 from models import AdminAction, AuthorizedUser, User
 from routers.board import _resolve_church
 from services.admin_commands import ALL_PERMISSIONS, PROFILE_DEFAULTS, get_effective_permissions
+from services.phone import canonical as canonical_phone
 
 router = APIRouter(prefix="/api/authorized", tags=["authorized"])
 
@@ -103,7 +104,7 @@ def create_user(
     db: Session = Depends(get_db),
 ):
     church = _resolve_church(db, user, church_id)
-    phone = "".join(c for c in data.phone if c.isdigit())
+    phone = canonical_phone(data.phone)
     if not phone or len(phone) < 10:
         raise HTTPException(status_code=400, detail="Telefone inválido")
     exists = (
@@ -145,7 +146,7 @@ def update_user(
     if data.name is not None:
         row.name = data.name.strip()
     if data.phone is not None:
-        phone = "".join(c for c in data.phone if c.isdigit())
+        phone = canonical_phone(data.phone)
         if not phone or len(phone) < 10:
             raise HTTPException(status_code=400, detail="Telefone inválido")
         clash = (

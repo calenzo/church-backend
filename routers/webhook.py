@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import SessionLocal, get_db
-from models import AdminAction, AuthorizedUser, Church, Contact, ContactMemory, Department, LLMConfig, MessageLog, RoutingRule, WhatsAppNumber
+from models import AdminAction, AuthorizedUser, Church, Contact, ContactMemory, Department, LLMConfig, Member, MessageLog, RoutingRule, WhatsAppNumber
 from services import evolution, llm
 from services.admin_commands import analyze_admin_command
 from services.group_send import execute_group_send, get_last_send_log, resolve_group_target
@@ -117,7 +117,8 @@ _CELEBRATION_DIRECTED_TO_AI = re.compile(
 # … e também não cala mensagens com pergunta/pedido ("qual o horário?"…).
 _CELEBRATION_BUSINESS = re.compile(
     r"(\?|qual\b|quando\b|onde\b|quem\b|o\s+que\b|pode\b|avise\b|mand\w\b|enviar?\b|"
-    r"quero\b|preciso\b|hor[aá]rio\b|ensaio\b|escala\b|culto\b|reuni[aã]o\b|anivers[iá]nte)",
+    r"quero\b|preciso\b|hor[aá]rio\b|ensaio\b|escala\b|culto\b|reuni[aã]o\b|"
+    r"anivers[iá]ntes?\b|anivers[aá]riant\w*\b|quais\b|liste\b|listar?\b|informe\b)",
     re.IGNORECASE,
 )
 
@@ -285,6 +286,54 @@ def _build_directory(db: Session, church_id: int | None, limit: int = 150) -> st
         "\n\nDiretório de contatos da igreja (agenda oficial; pode informar "
         "telefone e cargo destas pessoas quando pedirem):\n" + "\n".join(lines)
     )
+
+
+_BIRTHDAY_MONTHS = [
+    None, "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+]
+
+
+def _build_birthdays_block(db: Session, church_id: int | None) -> str:
+    """Monta o bloco 'Aniversariantes' com nomes dos membros cadastrados,
+    agrupados pelos aniversariantes de HOJE e do MÊS atual. Permite à IA
+    responder perguntas do tipo "quais aniversariantes do mês/dia" sem
+    inventar dados (base = tabela de membros do agendador de aniversários)."""
+    if not church_id:
+        return ""
+    try:
+        now = datetime.now()
+        month = now.month
+        day = now.day
+    except Exception:
+        return ""
+    rows = (
+        db.query(Member)
+        .filter(Member.church_id == church_id, Member.name != "")
+        .order_by(Member.birth_month, Member.birth_day, Member.name)
+        .all()
+    )
+    if not rows:
+        return ""
+    today = [m.name for m in rows if m.birth_month == month and m.birth_day == day]
+    this_month = [
+        f"{m.name} — {m.birth_day:02d}/{month:02d}"
+        for m in rows
+        if m.birth_month == month
+    ]
+    month_name = _BIRTHDAY_MONTHS[month] if 1 <= month <= 12 else str(month)
+    lines = []
+    if today:
+        lines.append("Aniversariantes de HOJE: " + ", ".join(today) + ".")
+    if this_month:
+        lines.append(
+            f"Aniversariantes do mês de {month_name}: " + "; ".join(this_month) + "."
+        )
+    lines.append(
+        "Quando perguntarem 'quais são os aniversariantes', informe por esta lista "
+        "e mencione a data (dia/mês) de cada um. Esta é a lista oficial de membros."
+    )
+    return "\n\nAniversariantes da igreja (lista oficial de membros):\n" + "\n".join(lines)
 
 
 def _strip_accents(value: str) -> str:
@@ -762,6 +811,7 @@ async def _process_message(log_id: int, instance_name: str, skip_admin: bool = F
             hits = _directory_hits(db, log.church_id, text)
             if hits:
                 directory_text += hits
+            birthdays_text = _build_birthdays_block(db, log.church_id)
             # Contato com linha em branco no cadastro = já convidamos a se identificar antes.
             asked_before = contact is not None and not known
             known_names = None
@@ -782,6 +832,7 @@ async def _process_message(log_id: int, instance_name: str, skip_admin: bool = F
                 routing_rules=routing_rules,
                 memory_text=memory_text,
                 directory_text=directory_text,
+                birthdays_text=birthdays_text,
             )
         except (evolution.EvolutionError, llm.LlmError) as exc:
             log.status = "failed"

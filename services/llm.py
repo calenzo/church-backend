@@ -54,6 +54,7 @@ Nunca use como lógica principal: PALAVRA-CHAVE -> DEPARTAMENTO -> RESPOSTA. Pal
   - Geralmente NÃO respondem em grupo: "Amém", "Glória a Deus", "Aleluia", "Orando 🙏", "Bom dia irmãos", "Deus abençoe", "Recebido", "Ok", "Obrigado", emojis soltos (🙏🙏🙏) e conversa entre outros integrantes do grupo (não interfira).
   - NÃO SE INTRUSE EM CONVERSAS ENTRE MEMBROS: se alguém está falando com outra pessoa do grupo (parabéns, agradecimento, elogio, consolo, mensagem personalizada), NÃO responda. Exemplos: "Parabéns querida norinha!", "Que Deus te abençoe, irmã!", "Fique com Deus, pastor!", "Adorei a mensagem, missionária!" — todas são conversas entre pessoas, não pedidos para o assistente. A IA é um observador silencioso, não participante. Fique em silêncio (reply "").
   - NÃO responda a menções de aniversário: "Feliz aniversário!", "Parabéns [nome]!", "Hoje é aniversário de...", "Que Deus abençoe [nome] no seu dia" etc. O sistema já envia lembretes AUTOMATICAMENTE pelo scheduler. Sua resposta seria DUPLICATA. Fique em silêncio (reply "").
+  - MAS responda quando a pessoa PERGUNTAR quem são os aniversariantes (ex.: "Quais são os aniversariantes do mês?", "quem faz aniversário hoje?", "quem é o aniversariante da semana?"): consulte o bloco "Aniversariantes da igreja (lista oficial de membros)" e INFORME os nomes com a data (dia/mês). Se a pergunta for sobre um mês específico que NÃO está no bloco, diga que não tem essa lista cadastrada. NUNCA invente nomes nem datas.
   - REGRA ABSOLUTA: "Feliz aniversário minha linda Deus abençoe sua vida sempre" é uma mensagem de UMA PESSOA para OUTRA. A IA NÃO responde. NÃO parabeniza de volta. NÃO pergunta o nome. NÃO se intromete. Reply: "". SEM EXCEÇÃO. Se houver qualquer dúvida, fique em silêncio — é sempre melhor não responder do que se intrometer em conversa alheia.
   - Responda no grupo quando: alguém fizer pergunta ou pedir informação à igreja; chamarem o assistente (ex.: "@ assistente", "bot", "robot"); houver pedido claro de oração; dúvida sobre programação, dúvida bíblica, departamento ou solicitação administrativa; ou mensagem que claramente espera resposta institucional.
 - VERIFICAÇÃO ANTI-ROBÔ antes de enviar qualquer resposta: (1) Entendi o que a pessoa realmente quis dizer? (2) Estou atribuindo a ela um pedido que ela não fez? (3) Estou inventando familiares, problemas ou necessidades? (4) Minha resposta parece algo que uma pessoa real escreveria no WhatsApp? (5) Estou respondendo só porque encontrei uma palavra-chave? (6) Esta mensagem realmente precisa de resposta? (7) Poderia ser mais curta e natural? (8) ESTA MENSAGEM É UMA CONVERSA ENTRE OUTRAS PESSOAS DO GRUPO? Se sim, fique em silêncio — a IA não participa de conversas alheias. Em caso de risco de interpretação errada, responda neutro ou fique em silêncio.
@@ -423,6 +424,7 @@ async def classify_and_reply(
     routing_rules: list[dict] | None = None,
     memory_text: str | None = None,
     directory_text: str | None = None,
+    birthdays_text: str | None = None,
 ) -> dict:
     """Envia a mensagem para a LLM e retorna {"department", "reply", ...}.
     `history` é uma lista [{"member": str, "assistant": str}] das mensagens
@@ -431,7 +433,8 @@ async def classify_and_reply(
     `asked_name_before` indica que já convidamos este número a se identificar.
     `known_names` são os nomes já cadastrados na igreja (para desambiguar nomes iguais).
     `routing_rules` são as regras de encaminhamento (assunto -> responsável) ativas.
-    `directory_text` é o bloco "Diretório de contatos da igreja" (agenda oficial)."""
+    `directory_text` é o bloco "Diretório de contatos da igreja" (agenda oficial).
+    `birthdays_text` é o bloco "Aniversariantes" (lista oficial de membros)."""
     departments_block = build_departments_block(departments)
     # As regras de comportamento valem SEMPRE; o texto personalizado da igreja
     # entra como complemento, nunca substituindo as regras fundamentais.
@@ -452,7 +455,8 @@ async def classify_and_reply(
         f"{build_sender_block(sender, asked_name_before, known_names)}\n"
         f"{build_history_block(history)}\n"
         f"{memory_text or ''}\n"
-        f"{directory_text or ''}\n\n"
+        f"{directory_text or ''}\n"
+        f"{birthdays_text or ''}\n\n"
         f"Mensagem atual do membro:\n\"{message}\""
     )
     if not history:
